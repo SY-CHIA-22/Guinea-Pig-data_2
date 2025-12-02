@@ -1,0 +1,672 @@
+---
+title: "Guinea Pig Growth Analysis"
+author: "Dr. Shaphan Yong Chia"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = TRUE,   # show code
+  warning    = FALSE,  # hide warnings in output
+  message    = FALSE,  # hide package loading messages
+  fig.align  = "center",
+  fig.width  = 7,
+  fig.height = 5
+)
+
+# R Markdown
+
+# This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>
+
+# When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document.
+
+# i - renv package
+
+```
+
+
+# renv
+
+```{r}
+
+#Install the renv package by running the following command:
+install.packages("renv")
+library(renv)
+
+#Set up renv for your project by navigating to your project's directory in R and running:
+  
+  renv::init()
+
+#This will create a new .Rprofile file and an renv folder in your project directory.
+
+renv::snapshot()
+
+```
+
+# 1. Load packages
+
+```{r}
+
+install.packages(c
+("tidyverse","readxl","janitor","car","lme4","lmerTest","performance","emmeans",
+  "effectsize","rstatix","ggpubr"
+))
+
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(car)
+library(lme4)
+library(lmerTest)
+library(performance)
+library(emmeans)
+library(effectsize)
+library(rstatix)
+library(ggpubr)
+library(ARTool)
+
+```
+
+# 2. Import and Clean Data  = Initial body weight
+
+```{r}
+# Read and clean data
+setwd("C:/Guinea-Pig-data_2/Data")
+dat <- read_excel("GP2_INITIAL_WEIGHT.xlsx") |> clean_names()
+
+# The function "clean_names()" cleans and standardizes all column names in your dataset.
+#Specifically, it:
+#Converts names to lowercase
+#Replaces spaces with underscores
+#Removes special characters (/, -, (), .)
+#Ensures names are valid R variables
+#Fixes duplicates (e.g., var, var_2, var_3)
+#Convert to proper types
+
+dat <- dat |>
+mutate(
+diet        = as.factor(diet),
+sex         = as.factor(sex),
+ini_weight   = as.numeric(ini_weight))
+
+glimpse(dat)
+summary(dat)
+
+```
+
+# 3. Baseline Check (Initial Weight)
+
+```{r}
+
+# check normality and homogeneity by diet and sex
+# --- 1. Fit two-way ANOVA model (Diet × Sex) ---
+mod_ini <- aov(ini_weight ~ diet * sex, data = dat)
+
+# --- 2. Extract residuals for diagnostics ---
+res <- residuals(mod_ini)
+
+# --- 3. Normality test on residuals ---
+shapiro_test <- shapiro.test(res)
+
+# --- 4. QQ plot for visual normality inspection ---
+library(ggplot2)
+p_qq <- ggplot(data.frame(res), aes(sample = res)) +
+  stat_qq() +
+  stat_qq_line() +
+  labs(title = "QQ-Plot of Residuals",
+       x = "Theoretical Quantiles",
+       y = "Sample Quantiles") +
+  theme_bw()
+
+# --- 5. Levene test for homogeneity of variances ---
+library(car)
+levene_test <- leveneTest(ini_weight ~ diet * sex, data = dat)
+
+# --- 6. Print all results ---
+print(summary(mod))
+print(shapiro_test)
+print(levene_test)
+
+# Show QQ plot
+p_qq
+
+
+#Conclusion (for ANOVA)
+#Since:
+#Shapiro–Wilk p-value > 0.05
+#QQ-plot shows deviations from normality
+#Residuals have heavy tails and repeated values
+#Assumption OF homogeneity of variances (equal variances across groups) is violated.
+#ANOVA normality assumption is violated.
+#DO NOT use ANOVA.
+#Use Kruskal–Wallis Test
+
+
+# COMPARE MEANS FOR INITIAL WEIGHT # Kruskal–Wallis Test Within Each Sex**
+
+### Females**
+# Subset females
+dat_f <- dat %>% filter(sex == "females")
+
+# KW test
+kw_f <- kruskal_test(dat_f, ini_weight ~ diet)
+kw_f # no sig. diff.
+
+# Dunn post-hoc
+dunn_f <- dunn_test(dat_f, ini_weight ~ diet, p.adjust.method = "bonferroni")
+dunn_f
+
+### Males**
+# Subset males
+dat_m <- dat %>% filter(sex == "males")
+
+# KW test
+kw_m <- kruskal_test(dat_m, ini_weight ~ diet)
+kw_m
+
+# Dunn post-hoc 
+dunn_m <- dunn_test(dat_m, ini_weight ~ diet, p.adjust.method = "bonferroni")
+dunn_m
+
+#####################
+#Test main and interaction effects using the Aligned Rank Transform method (ART)
+library(ARTool)
+
+mod_art <- art(ini_weight ~ diet * sex, data = dat)
+
+anova(mod_art)
+
+
+## 3. Add Significance Letters for Each Sex**
+### Females
+library(rstatix)
+library(multcompView)
+library(tibble)
+library(dplyr)
+
+# p-value matrix for females
+# All diet levels appearing in Dunn test (should be "1","2","3","4")
+groups_f <- sort(unique(c(as.character(dunn_f$group1),
+                          as.character(dunn_f$group2))))
+
+# Initialize square matrix of 1's (no difference)
+pmat_f <- matrix(1,
+                 nrow = length(groups_f),
+                 ncol = length(groups_f),
+                 dimnames = list(groups_f, groups_f))
+
+# Fill matrix with adjusted p-values (both [i,j] and [j,i])
+for (i in seq_len(nrow(dunn_f))) {
+  g1 <- as.character(dunn_f$group1[i])
+  g2 <- as.character(dunn_f$group2[i])
+  p  <- dunn_f$p.adj[i]
+  pmat_f[g1, g2] <- p
+  pmat_f[g2, g1] <- p
+}
+
+# Get compact letter display
+letters_f <- multcompLetters(pmat_f)$Letters |>
+  enframe(name = "diet", value = "letter") |>
+  mutate(diet = factor(diet, levels = levels(dat_f$diet)))
+letters_f
+
+### Males
+groups_m <- sort(unique(c(as.character(dunn_m$group1),
+                          as.character(dunn_m$group2))))
+
+pmat_m <- matrix(1,
+                 nrow = length(groups_m),
+                 ncol = length(groups_m),
+                 dimnames = list(groups_m, groups_m))
+
+for (i in seq_len(nrow(dunn_m))) {
+  g1 <- as.character(dunn_m$group1[i])
+  g2 <- as.character(dunn_m$group2[i])
+  p  <- dunn_m$p.adj[i]
+  pmat_m[g1, g2] <- p
+  pmat_m[g2, g1] <- p
+}
+
+letters_m <- multcompLetters(pmat_m)$Letters |>
+  enframe(name = "diet", value = "letter") |>
+  mutate(diet = factor(diet, levels = levels(dat_m$diet)))
+letters_m
+
+
+### Use letters in plots for female and male separately
+### FEMALE
+pos_f <- dat_f %>%
+  group_by(diet) %>%
+  summarise(ymax = max(ini_weight, na.rm = TRUE), .groups = "drop") %>%
+  left_join(letters_f, by = "diet")
+
+ggplot(dat_f, aes(x = diet, y = ini_weight)) +
+  geom_violin(fill = "#A7C7E7", color = "#4A6FA5", trim = FALSE, alpha = 0.8) +
+  geom_boxplot(width = 0.12, outlier.shape = NA, fill = "white", color = "black") +
+  geom_jitter(width = 0.08, alpha = 0.5, size = 1.3) +
+  geom_text(data = pos_f,
+            aes(x = diet, y = ymax + 15, label = letter),
+            fontface = "bold", size = 5) +
+  labs(title = "Initial Weight by Diet (Females)",
+       x = "Diet", y = "Initial Weight (g)") +
+  theme_bw(base_size = 14)
+
+### MALE
+pos_m <- dat_m %>%
+  group_by(diet) %>%
+  summarise(ymax = max(ini_weight, na.rm = TRUE), .groups = "drop") %>%
+  left_join(letters_m, by = "diet")
+
+ggplot(dat_m, aes(x = diet, y = ini_weight)) +
+  geom_violin(fill = "#CBE7A1", color = "#5A7F33", trim = FALSE, alpha = 0.8) +
+  geom_boxplot(width = 0.12, outlier.shape = NA, fill = "white", color = "black") +
+  geom_jitter(width = 0.08, alpha = 0.5, size = 1.3) +
+  geom_text(data = pos_m,
+            aes(x = diet, y = ymax + 15, label = letter),
+            fontface = "bold", size = 5) +
+  labs(title = "Initial Weight by Diet (Males)",
+       x = "Diet", y = "Initial Weight (g)") +
+  theme_bw(base_size = 14)
+
+
+#########################################
+## Prepare letters for both sexes
+library(dplyr)
+library(ggplot2)
+library(tibble)
+
+# Ensure factors
+dat <- dat %>%
+  mutate(
+    sex  = factor(sex),
+    diet = factor(diet)
+  )
+
+# Attach sex to letters and combine
+letters_f2 <- letters_f %>%
+  mutate(sex = "females")
+
+letters_m2 <- letters_m %>%
+  mutate(sex = "males")
+
+letters_all <- bind_rows(letters_f2, letters_m2) %>%
+  mutate(
+    sex  = factor(sex,  levels = levels(dat$sex)),
+    diet = factor(diet, levels = levels(dat$diet))
+  )
+
+# Positions for letters (top of violins)
+pos_all <- dat %>%
+  group_by(sex, diet) %>%
+  summarise(
+    ymax = max(ini_weight, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(letters_all, by = c("sex", "diet"))
+
+# Sample size per diet × sex
+n_all <- dat %>%
+  group_by(sex, diet) %>%
+  summarise(n = n(), .groups = "drop")
+
+# Global min & range for positioning n labels slightly below data
+global_min   <- min(dat$ini_weight, na.rm = TRUE)
+global_max   <- max(dat$ini_weight, na.rm = TRUE)
+global_range <- global_max - global_min
+baseline_n   <- global_min - 0.05 * global_range  # adjust if needed
+
+# Sex-specific mean lines
+sex_means <- dat %>%
+  group_by(sex) %>%
+  summarise(mean_init = mean(ini_weight, na.rm = TRUE), .groups = "drop")
+
+
+############### Final faceted violin + boxplot + mean diamonds + N labels + reference lines
+ggplot(dat, aes(x = diet, y = ini_weight)) +
+  
+  # Sex-specific horizontal reference lines (mean initial weight per sex)
+  geom_hline(
+    data        = sex_means,
+    aes(yintercept = mean_init),
+    linetype    = "dashed",
+    colour      = "grey50",
+    linewidth   = 0.5,
+    inherit.aes = FALSE
+  ) +
+  
+  # Violin (soft teal distribution)
+  geom_violin(
+    fill      = "#9AD3CA",   # soft teal
+    colour    = "#2A776C",   # deeper teal outline
+    trim      = FALSE,
+    alpha     = 0.9,
+    linewidth = 0.7
+  ) +
+  
+  # Boxplot (median & IQR on top of violin)
+  geom_boxplot(
+    width         = 0.10,
+    outlier.shape = NA,
+    fill          = "white",
+    colour        = "black",
+    linewidth     = 0.7
+  ) +
+  
+  # Mean diamonds per diet × sex (strong but elegant highlight)
+  stat_summary(
+    fun    = mean,
+    geom   = "point",
+    shape  = 23,           # diamond
+    size   = 3.8,
+    fill   = "#2A776C",    # deep teal fill
+    colour = "white",      # white border for contrast
+    stroke = 0.9
+  ) +
+  
+  # Significance letters above violins
+  geom_text(
+    data        = pos_all,
+    aes(x = diet, y = ymax + 0.06 * global_range, label = letter),
+    inherit.aes = FALSE,
+    fontface    = "bold",
+    size        = 4
+  ) +
+  
+  facet_wrap(~ sex, nrow = 1) +
+  
+  labs(
+    title = "Initial Body Weight by Diet, Faceted by Sex",
+    x     = "Diet",
+    y     = "Initial Body Weight (g)"
+  ) +
+  
+  expand_limits(y = baseline_n) +  # ensure n labels are visible
+  
+  theme_bw(base_size = 14) +
+  theme(
+    plot.title   = element_text(face = "bold", size = 16, hjust = 0.5),
+    axis.title.x = element_text(face = "bold"),
+    axis.title.y = element_text(face = "bold"),
+    axis.text    = element_text(colour = "black"),
+    panel.grid   = element_blank(),
+    panel.border = element_rect(colour = "black", linewidth = 0.8),
+    strip.text   = element_text(face = "bold", size = 14),
+    legend.position = "none"
+  )
+
+```
+
+# 4. Feed intake
+
+```{r}
+library(readxl)
+library(janitor)
+setwd("C:/Guinea-Pig-data_2/Data")
+
+dat_feed <- read_excel("GP2_Feedintake.xlsx") %>%
+  clean_names()
+
+glimpse(dat_feed)
+
+###### summary
+summary_adfi <- dat_feed %>%
+  group_by(diet, sex) %>%
+  summarise(
+    mean_adfi = mean(adfi, na.rm = TRUE),
+    sd_adfi   = sd(adfi, na.rm = TRUE),
+    n         = n(),
+    .groups   = "drop"
+  )
+summary_adfi
+
+# Convert to correct formats
+dat_feed <- dat_feed %>%
+  mutate(
+    diet        = factor(diet),          # T1, T2, T3, T4
+    compartment = factor(compartment),   # Compartment IDs
+    animals     = as.numeric(animals),   # Number of animals
+    sex         = factor(sex),           # F or M
+    feed_intake = as.numeric(feed_intake)  # Daily intake per compartment
+  )
+
+## check for normality
+res <- residuals(aov(adfi ~ diet * sex, data = dat_feed))
+shapiro.test(res) # violated
+
+#homogeneity of varance
+car::leveneTest(adfi ~ diet * sex, data = dat_feed) # voilated
+
+
+#therefore, use ART TEST
+mod_art_adfi <- art(adfi ~ diet * sex, data = dat_feed)
+anova(mod_art_adfi)
+
+#1: emmeans for the interaction
+library(emmeans)
+library(multcompView)
+library(dplyr)
+library(tidyr)
+
+emm_inter <- emmeans(
+  artlm(mod_art_adfi, "diet:sex"),
+  ~ diet:sex
+)
+
+emm_inter
+
+#2: Compact letter display (significance letters)
+library(emmeans)
+emmeans::cld
+
+
+library(multcomp)
+
+letters_inter <- multcomp::cld(
+  emm_inter,
+  level   = 0.05,
+  Letters = letters,
+  adjust  = "sidak"
+)
+
+# compare levels of diet within each level of sex
+## Estimated marginal means
+emm_inter <- emmeans(artlm(mod_art_adfi, "diet:sex"), ~ diet | sex)
+
+## Pairwise comparisons per sex
+pairs_inter <- contrast(emm_inter, method = "pairwise", adjust = "tukey")
+pairs_inter
+
+
+## Significance letters within each sex
+library(multcomp)
+
+letters_within <- multcomp::cld(
+  emm_inter,
+  level   = 0.05,
+  Letters = letters,
+  adjust  = "tukey"
+)
+letters_within
+
+############################################# plot feed intake
+
+# Convert to plain data frame
+lf <- as.data.frame(letters_within)
+
+# Inspect column names once (optional, just to see them)
+names(lf)
+
+
+# Automatically detect the relevant columns
+diet_col   <- grep("diet",   names(lf), ignore.case = TRUE, value = TRUE)[1]
+sex_col    <- grep("sex",    names(lf), ignore.case = TRUE, value = TRUE)[1]
+letter_col <- grep("group|letters", names(lf), ignore.case = TRUE, value = TRUE)[1]
+
+# Subset and rename
+letters_df <- lf[, c(diet_col, sex_col, letter_col)]
+names(letters_df) <- c("diet", "sex", "letter")
+
+# Make sure diet and sex are factors
+letters_df$diet <- as.factor(letters_df$diet)
+letters_df$sex  <- as.factor(letters_df$sex)
+
+letters_df
+
+
+### Build pos_all for plotting
+library(dplyr)
+
+pos_all <- dat_feed %>%
+  group_by(diet, sex) %>%
+  summarise(
+    ymax = max(adfi, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(letters_df, by = c("diet", "sex"))
+
+pos_all
+
+### Global range for letter placement
+
+global_min   <- min(dat_feed$adfi, na.rm = TRUE)
+global_max   <- max(dat_feed$adfi, na.rm = TRUE)
+global_range <- global_max - global_min
+
+
+### Final journal-ready plot with letters
+library(ggplot2)
+
+ggplot(dat_feed, aes(x = diet, y = adfi)) +
+  
+  # Violin: soft teal
+  geom_violin(
+    fill      = "#9AD3CA",
+    colour    = "#2A776C",
+    trim      = FALSE,
+    alpha     = 0.9,
+    linewidth = 0.7
+  ) +
+  
+  # Boxplot
+  geom_boxplot(
+    width         = 0.12,
+    outlier.shape = NA,
+    fill          = "white",
+    colour        = "black",
+    linewidth     = 0.7
+  ) +
+  
+  # Mean diamond
+  stat_summary(
+    fun    = mean,
+    geom   = "point",
+    shape  = 23,
+    size   = 3.8,
+    fill   = "#2A776C",
+    colour = "white",
+    stroke = 0.9
+  ) +
+  
+  # ART-Tukey significance letters
+  geom_text(
+    data        = pos_all,
+    aes(x = diet, y = ymax + 0.06 * global_range, label = letter),
+    inherit.aes = FALSE,
+    fontface    = "bold",
+    size        = 4
+  ) +
+  
+  facet_wrap(~ sex, nrow = 1) +
+  
+  labs(
+    title = "Average Daily Feed Intake per Animal by Diet and Sex",
+    x     = "Diet",
+    y     = "ADFI (g/day per animal)"
+  ) +
+  
+  # FORCE y-axis to start at zero
+  expand_limits(y = 0) +
+  
+  theme_bw(base_size = 14) +
+  theme(
+    plot.title   = element_text(face = "bold", size = 16, hjust = 0.5),
+    axis.title.x = element_text(face = "bold"),
+    axis.title.y = element_text(face = "bold"),
+    axis.text    = element_text(colour = "black"),
+    strip.text   = element_text(face = "bold", size = 14),
+    panel.grid   = element_blank(),
+    panel.border = element_rect(colour = "black", linewidth = 0.8),
+    legend.position = "none"
+  )
+
+### summary table 
+library(dplyr)
+
+adfi_summary <- dat_feed %>%
+  group_by(diet, sex) %>%
+  summarise(
+    n         = n(),
+    mean_ADFI = mean(adfi, na.rm = TRUE),
+    sd_ADFI   = sd(adfi, na.rm = TRUE),
+    sem_ADFI  = sd(adfi, na.rm = TRUE) / sqrt(n()),
+    .groups   = "drop"
+  )
+
+adfi_summary
+
+
+```
+
+# 5. Calculate feed conversion ratio (FCR)
+```{r}
+# Because your feed-intake data is per day per compartment, and your weight data is per animal per week, we must create FCR in a biologically valid way.
+
+#Below is the clean, correct approach depending on the data you already have.
+
+# 1. Formula for Feed Conversion Ratio (FCR)
+#FCR determines how much feed is needed to produce 1 unit of body-weight gain:
+# FCR=Feed Intake/Body Weight Gain
+# Lower FCR = better performance.
+# Uses the weekly feed intake per animal and weekly body-weight gain.
+# Weekly FCR = Weekly Feed Intake per Animal/Weekly Weight Gain
+
+
+
+
+
+```
+
+
+# 5. Best Plots for Weekly Growth
+
+## 4.1 Mean ± SE and Spaghetti Plot
+
+```{r}
+# Weekly summary
+
+sum_week <- dat |>
+group_by(week_num, diet) |>
+summarise(
+mean_bw = mean(weekly_weight, na.rm = TRUE),
+se = sd(weekly_weight, na.rm = TRUE) / sqrt(n()),
+.groups = "drop"
+)
+
+# Plot
+
+ggplot(dat, aes(week_num, weekly_weight, group = compartment, color = diet)) +
+geom_line(alpha = 0.25) +
+geom_ribbon(data = sum_week,
+aes(y = mean_bw, ymin = mean_bw - se, ymax = mean_bw + se, group = diet),
+inherit.aes = FALSE, alpha = 0.15) +
+geom_line(data = sum_week, aes(y = mean_bw, group = diet), linewidth = 1) +
+geom_point(data = sum_week, aes(y = mean_bw), size = 1.6) +
+labs(title = "Weekly Body Weight Trajectories by Diet",
+x = "Week", y = "Body Weight (g)") +
+theme_bw(base_size = 13)
+
+```

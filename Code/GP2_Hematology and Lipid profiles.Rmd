@@ -1,0 +1,280 @@
+---
+title: "Effect of Diet and Sex on Haematology and Lipid Profiles in Guinea Pigs"
+author: "Shaphan Chia"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 7,
+  fig.height = 5
+)
+```
+
+# 1. Study Overview and Analysis Plan
+
+## 1.1 Background
+
+This study evaluates the effects of four experimental diets on haematological and lipid profile parameters in male and female Guinea pigs.
+
+Each animal received one of four diets (factor Diet, 4 levels), and blood samples were collected and analysed for full blood count and lipid profiles. The design is a two–factor factorial:
+
+- Fixed factor 1: Diet (4 levels)
+- Fixed factor 2: sex (Male, Female)
+
+Response variables:
+
+- Red cell indices: RBC, MCH, MCHC, MCV, RDW, HAEMO, HCT
+- White cell counts: WBC, Basophils_abs, Eosinophils_abs, Lymphocytes_abs, Monocytes_abs, Neutrophils_abs, Platelets
+- Differential white cell %: Basophils, Eosinophils, Lymphocytes, Monocytes, Neutrophils
+- Lipid profile: CHOL, LDL, TRIG, HDL
+
+## 1.2 Objectives
+
+1. Describe the distribution of blood and lipid parameters across Diet and sex.
+2. Test the main effects of Diet and sex, and their interaction on each parameter (univariate analysis).
+3. Assess whether Diet and sex have a multivariate effect across all biomarkers (MANOVA).
+4. Explore overall patterns via principal component analysis (PCA).
+
+## 1.3 Statistical Plan (Summary)
+
+- Data inspection and cleaning.
+- Exploratory data analysis (summary statistics, boxplots, correlations).
+- Assumption checks for linear models (normality of residuals, homoscedasticity, outliers).
+- For each variable:
+  - Fit a two–way linear model: Y ~ Diet * sex.
+  - Perform Type III ANOVA (Diet, sex, Diet×sex).
+  - Obtain marginal means and post-hoc contrasts (Tukey) using emmeans.
+- Perform MANOVA with a subset/all biomarkers as a response matrix.
+- Perform PCA on scaled biomarkers and visualise clustering by Diet and sex.
+
+
+
+# 2. Install Packages
+
+```{r packages}
+install.packages("readxl")
+install.packages("tidyverse")
+install.packages("Matrix")
+install.packages("car")
+install.packages("emmeans")
+install.packages("performance")
+install.packages("psych")
+install.packages("corrplot")
+install.packages("ggpubr")
+install.packages("patchwork")
+install.packages("FactoMineR")
+install.packages("factoextra")
+
+
+```
+
+## Load packages
+
+```{r packages}
+
+library(readxl)
+library(tidyverse)
+library(car)
+library(emmeans)
+library(performance)
+library(psych)
+library(corrplot)
+library(ggpubr)
+library(patchwork)
+library(FactoMineR)
+library(factoextra)
+
+
+```
+
+### renv
+
+```{r}
+#Install the renv package by running the following command:
+install.packages("renv")
+library(renv)
+
+#Set up renv for your project by navigating to your project's directory in R and running:
+  
+  renv::init()
+
+#This will create a new .Rprofile file and an renv folder in your project directory.
+renv::status()
+renv::snapshot()
+
+```
+
+```{r import-data}
+setwd("C:/Guinea-Pig-data_2/Data")
+df <- read_excel("GP2_BLOOD TRAITS.xlsx")
+
+df <- df %>%
+  mutate(
+    Diet = factor(Diet),
+    sex  = factor(sex)
+  )
+
+str(df)
+```
+
+# 3. Data Cleaning and Structure
+
+```{r data-check}
+
+colSums(is.na(df))
+summary(select(df, RBC:HDL))
+
+```
+
+# 4. Exploratory Data Analysis (EDA)
+
+## 4.1 Descriptive Statistics by Diet and Sex
+
+```{r descriptive-stats}
+biomarkers <- c("RBC","MCH","MCHC","MCV","RDW","HAEMO","HCT",
+                "WBC","Basophils_abs","Eosinophils_abs","Lymphocytes_abs",
+                "Monocytes_abs","Neutrophils_abs","Platelets",
+                "Basophils","Eosinophils","Lymphocytes","Monocytes","Neutrophils",
+                "CHOL","LDL","TRIG","HDL")
+
+desc_stats <- df %>%
+  group_by(Diet, sex) %>%
+  summarise(
+    across(all_of(biomarkers),
+           list(mean = ~mean(.x, na.rm = TRUE),
+                sd   = ~sd(.x, na.rm = TRUE)),
+           .names = "{.col}_{.fn}"),
+    .groups = "drop"
+  )
+
+desc_stats
+
+```
+
+## 4.2 Visualize data
+
+```{r boxplots-selected}
+
+ggplot(df, aes(Diet, RBC, fill = sex)) +
+  geom_boxplot() +
+  theme_bw() +
+  labs(title = "RBC by Diet and Sex")
+
+
+```
+
+## 4.3 Correlation Matrix
+
+```{r correlation-matrix}
+num_data <- df %>% select(all_of(biomarkers))
+cor_mat <- cor(num_data, use = "pairwise.complete.obs")
+corrplot(cor_mat, method = "color", type = "upper", tl.cex = 0.7,
+         order = "hclust", addCoef.col = "black", number.cex = 0.4)
+```
+
+# 5. Assumption Checks
+
+```{r assumption-helper}
+check_assumptions <- function(var, data) {
+  formula <- as.formula(paste(var, "~ Diet * sex"))
+  model   <- lm(formula, data = data)
+
+  cat("Variable:", var, "
+")
+
+  print(shapiro.test(residuals(model)))
+
+  data$resid_tmp <- residuals(model)
+  print(car::leveneTest(resid_tmp ~ Diet * sex, data = data))
+
+  print(performance::check_model(model))
+
+  invisible(model)
+}
+
+mod_WBC  <- check_assumptions("WBC", df)
+mod_CHOL <- check_assumptions("CHOL", df)
+```
+
+# 6. Univariate Two–Way ANOVA
+
+```{r anova-loop}
+anova_results <- list()
+models        <- list()
+
+for (var in biomarkers) {
+  formula <- as.formula(paste(var, "~ Diet * sex"))
+  model   <- lm(formula, data = df)
+  models[[var]] <- model
+
+  aov_tab <- car::Anova(model, type = 3)
+  anova_results[[var]] <- aov_tab
+
+  cat("ANOVA for:", var, "
+")
+  print(aov_tab)
+}
+```
+
+## Post-hoc Example for CHOL
+
+```{r chol-emmeans}
+model_chol <- models[["CHOL"]]
+
+car::Anova(model_chol, type = 3)
+
+emm_chol_diet <- emmeans(model_chol, ~ Diet)
+pairs(emm_chol_diet, adjust = "tukey")
+
+emm_chol_sex  <- emmeans(model_chol, ~ sex)
+pairs(emm_chol_sex, adjust = "tukey")
+
+emm_chol_int <- emmeans(model_chol, ~ Diet | sex)
+pairs(emm_chol_int, adjust = "tukey")
+```
+
+# 7. MANOVA
+
+```{r manova}
+manova_model <- manova(
+  cbind(RBC,MCH,MCHC,MCV,RDW,HAEMO,HCT,
+        WBC,Basophils_abs,Eosinophils_abs,Lymphocytes_abs,
+        Monocytes_abs,Neutrophils_abs,Platelets,
+        Basophils,Eosinophils,Lymphocytes,Monocytes,Neutrophils,
+        CHOL,LDL,TRIG,HDL) ~ Diet * sex,
+  data = df
+)
+
+summary(manova_model, test = "Pillai")
+```
+
+# 8. PCA
+
+```{r pca}
+pca_data <- df %>% select(all_of(biomarkers)) %>% na.omit()
+pca_res <- FactoMineR::PCA(pca_data, scale.unit = TRUE, graph = FALSE)
+
+fviz_pca_biplot(
+  pca_res,
+  habillage = df$Diet[as.numeric(rownames(pca_res$call$X))],
+  addEllipses = TRUE,
+  ellipse.level = 0.95,
+  repel = TRUE
+)
+```
+
+# 9. Session Info
+
+```{r session-info}
+sessionInfo()
+```
