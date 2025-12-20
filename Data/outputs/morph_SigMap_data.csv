@@ -1,0 +1,29 @@
+Trait,Effect,Sig,p_lab
+Height,Diet,ns,0.292
+Height,Sex,**,0.006
+Height,Period (Initial vs Final),*,0.020
+Height,Diet × Sex,ns,0.142
+Height,Diet × Period,ns,0.510
+Height,Sex × Period,ns,0.926
+Height,Diet × Sex × Period,*,0.029
+Width,Diet,ns,0.132
+Width,Sex,***,<0.001
+Width,Period (Initial vs Final),***,<0.001
+Width,Diet × Sex,**,0.001
+Width,Diet × Period,ns,0.268
+Width,Sex × Period,ns,0.438
+Width,Diet × Sex × Period,**,0.003
+Length,Diet,ns,0.289
+Length,Sex,***,<0.001
+Length,Period (Initial vs Final),***,<0.001
+Length,Diet × Sex,ns,0.341
+Length,Diet × Period,ns,0.384
+Length,Sex × Period,†,0.087
+Length,Diet × Sex × Period,ns,0.777
+Girth,Diet,***,<0.001
+Girth,Sex,*,0.019
+Girth,Period (Initial vs Final),***,<0.001
+Girth,Diet × Sex,ns,0.566
+Girth,Diet × Period,*,0.020
+Girth,Sex × Period,ns,0.561
+Girth,Diet × Sex × Period,†,0.055
