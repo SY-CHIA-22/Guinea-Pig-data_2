@@ -1,0 +1,341 @@
+---
+## =========================================================
+## Meat preparation preference analysis (Excel input)
+## Coding: 1 = Yes; 2 = No
+## =========================================================
+---
+
+```{r setup, include=FALSE}
+
+## =========================================================
+## Meat preparation preference analysis (LONG format)
+## Expected columns: respondent | method | response
+## Coding: 1 = Yes; 2 = No
+## =========================================================
+
+# 0) Packages (installs if missing)
+pkgs <- c("readxl","janitor","dplyr","tidyr","ggplot2","scales","knitr","kableExtra","readr","stringr")
+to_install <- pkgs[!pkgs %in% installed.packages()[, "Package"]]
+if (length(to_install) > 0) install.packages(to_install)
+invisible(lapply(pkgs, library, character.only = TRUE))
+
+```
+
+```{r setup, include=FALSE}
+## =========================================================
+## Load required packages (explicit)
+## =========================================================
+library(readxl)
+library(janitor)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(scales)
+library(knitr)
+library(kableExtra)
+library(readr)
+
+```
+```{r setup, include=FALSE}
+# 1) Import Excel
+setwd("C:/Guinea-Pig-data_2/Data")
+dat_meat <- readxl::read_excel("GP2_MEAT_PREPARATION.xlsx") %>%
+  janitor::clean_names()
+
+# Confirm columns
+print(names(dat_meat))
+print(head(dat_meat, 10))
+
+# 2) Check required columns (because your file is LONG format)
+needed <- c("respondent","method","response")
+missing_needed <- setdiff(needed, names(dat_meat))
+if (length(missing_needed) > 0) {
+  stop("Missing required columns: ", paste(missing_needed, collapse = ", "),
+       "\nYour file currently has: ", paste(names(dat_meat), collapse = ", "))
+}
+
+# 3) Clean + standardize method labels and recode response
+library(dplyr)
+library(tidyr)
+library(stringr)
+
+dat_clean <- dat_meat %>%
+  mutate(
+    method   = toupper(stringr::str_trim(as.character(method))),
+    response = as.numeric(response),
+    pref = dplyr::case_when(
+      response == 1 ~ 1,          # Yes
+      response == 2 ~ 0,          # No
+      TRUE ~ NA_real_
+    )
+  )
+
+# Optional: map variations to your 5 target categories
+dat_clean <- dat_clean %>%
+  mutate(
+    method = dplyr::case_when(
+      stringr::str_detect(method, "^GRILL")            ~ "GRILLING",
+      stringr::str_detect(method, "^FRY")              ~ "FRYING",
+      stringr::str_detect(method, "STEW|BOIL")         ~ "STEWING_BOILING",
+      stringr::str_detect(method, "^ROAST")            ~ "ROASTING"),
+    method = factor(method, levels = c("GRILLING","FRYING","STEWING_BOILING","ROASTING"))
+  )
+
+# 4) Sample size (unique respondents)
+n_respondents <- dat_clean %>% distinct(respondent) %>% nrow()
+cat("\nUnique respondents:", n_respondents, "\n")
+
+# 5) Quick value checks
+cat("\nResponse values observed:\n")
+print(table(dat_clean$response, useNA = "ifany"))
+
+cat("\nMethods observed after standardization:\n")
+print(table(dat_clean$method, useNA = "ifany"))
+
+# 6) Preference summary (n and % Yes per method)
+pref_summary <- dat_clean %>%
+  group_by(method) %>%
+  summarise(
+    `Yes (n)` = sum(pref == 1, na.rm = TRUE),
+    `Non-missing (n)` = sum(!is.na(pref)),
+    `Yes (%)` = round(100 * mean(pref == 1, na.rm = TRUE), 1),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(`Yes (%)`))
+
+print(pref_summary)
+
+
+
+# 7) Nice table output
+print(
+  knitr::kable(pref_summary,
+               caption = "Preferences for Meat Preparation Methods (Multiple Responses Allowed)",
+               align = "lccc") %>%
+    kableExtra::kable_styling(full_width = FALSE, bootstrap_options = c("striped","hover"))
+)
+
+
+# 8) Plot: % preferring each method (recommended)
+p1 <- ggplot(pref_summary, aes(x = reorder(as.character(method), `Yes (%)`), y = `Yes (%)`)) +
+  geom_col(width = 0.65) +
+  geom_text(aes(label = paste0(`Yes (%)`, "%")), hjust = -0.12, size = 4) +
+  coord_flip() +
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, 10),
+    expand = expansion(mult = c(0, 0.12))
+  ) +
+  labs(
+    x = "Preparation Method",
+    y = "Respondents preferring (%)",
+    title = "Preferred Methods of Meat Preparation",
+    subtitle = "Multiple responses allowed"
+  ) +
+  theme_minimal(base_size = 13)
+
+print(p1)
+
+####### Order factor for plotting
+
+#summary table - draft
+pref_summary <- dat_clean %>%
+  filter(!is.na(pref), !is.na(method)) %>%
+  group_by(method) %>%
+  summarise(
+    n_yes   = sum(pref == 1),
+    n_total = n(),
+    pct_yes = 100 * (n_yes / n_total),
+    .groups = "drop"
+  ) %>%
+  rowwise() %>%
+  mutate(
+    ci = list(wilson_ci(n_yes, n_total)),
+    ci_low  = 100 * ci[[1]]["lo"],
+    ci_high = 100 * ci[[1]]["hi"]
+  ) %>%
+  ungroup() %>%
+  mutate(
+    Method = stringr::str_replace_all(as.character(method), "_", " ") |>
+             stringr::str_to_title()
+  ) %>%
+  arrange(desc(pct_yes))
+
+####
+
+pref_table <- pref_summary %>%
+  transmute(
+    Method,
+    `Yes (n)` = n_yes,
+    `Non-missing (n)` = n_total,
+    `Yes (%) [95% CI]` = sprintf(
+      "%.1f [%.1f–%.1f]", pct_yes, ci_low, ci_high
+    )
+  )
+
+
+#figure for 'yes' - final
+pref_plotdat <- pref_summary %>%
+  mutate(Method = factor(Method, levels = rev(Method)))
+
+p1 <- ggplot(pref_plotdat,
+             aes(x = Method, y = pct_yes)) +
+  geom_col(
+    width = 0.68,
+    color = "black",
+    linewidth = 0.35
+  ) +
+  geom_errorbar(
+    aes(ymin = ci_low, ymax = ci_high),
+    width = 0.18,
+    linewidth = 0.5
+  ) +
+  geom_text(
+    aes(label = sprintf("%.1f%%", pct_yes)),
+    hjust = -0.10,
+    size = 3.8
+  ) +
+  coord_flip() +
+  scale_y_continuous(
+    limits = c(0, 100),
+    breaks = seq(0, 100, 10),
+    expand = expansion(mult = c(0, 0.12))
+  ) +
+  labs(
+    x = NULL,
+    y = "Respondents preferring (%)",
+    title = "Preference for meat preparation methods",
+    subtitle = "Bars show % preferring; error bars show 95% confidence intervals"
+  ) +
+  theme_classic(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.y = element_text(face = "bold"),
+    axis.line = element_line(linewidth = 0.4),
+    axis.ticks = element_line(linewidth = 0.4)
+  )
+
+print(p1)
+
+
+
+# 9) Optional plot: Yes/No distribution by method (stacked proportions)
+long_dat <- dat_clean %>%
+  mutate(Response = factor(pref, levels = c(1,0), labels = c("Yes","No"))) %>%
+  filter(!is.na(Response))
+
+p2 <- ggplot(long_dat, aes(x = method, fill = Response)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent, expand = expansion(mult = c(0, 0.02))) +
+  coord_flip() +
+  labs(
+    x = "Preparation Method",
+    y = "Proportion of respondents",
+    fill = "Response",
+    title = "Yes/No Response Distribution by Method"
+  ) +
+  theme_minimal(base_size = 13)
+
+print(p2)
+
+# 10) Optional inference: Binomial tests vs 50% (BH-adjusted)
+# Binomial tests vs 50% (BH-adjusted) -- using numeric columns from pref_summary
+binom_results <- pref_summary %>%
+  mutate(
+    p_value = mapply(function(x, n) binom.test(x, n, p = 0.5)$p.value,
+                     n_yes, n_total),
+    p_adj_bh = p.adjust(p_value, method = "BH"),
+    significant_0_05 = ifelse(p_adj_bh < 0.05, "Yes", "No")
+  ) %>%
+  transmute(
+    Method,
+    `Yes (n)` = n_yes,
+    `Non-missing (n)` = n_total,
+    `Yes (%)` = round(pct_yes, 1),
+    `95% CI` = sprintf("%.1f–%.1f", ci_low, ci_high),
+    p_value = signif(p_value, 3),
+    p_adj_bh = signif(p_adj_bh, 3),
+    significant_0_05
+  ) %>%
+  arrange(p_adj_bh)
+
+# Print nicely (journal style table)
+knitr::kable(
+  binom_results,
+  caption = "Binomial tests of preference vs 50% (BH-adjusted).",
+  booktabs = TRUE,
+  align = "lcccrrrc"
+) %>%
+  kableExtra::kable_styling(full_width = FALSE, font_size = 11)
+
+
+#######################
+
+## =========================================================
+## Add binomial-test significance (BH-adjusted) to TABLE + FIGURE
+## Assumes pref_summary already contains:
+## Method, n_yes, n_total, pct_yes, ci_low, ci_high
+## =========================================================
+
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(knitr)
+library(kableExtra)
+
+# 1) Binomial tests (H0: p = 0.5) + BH adjustment + significance stars
+pref_stats <- pref_summary %>%
+  mutate(
+    p_value = mapply(function(x, n) binom.test(x, n, p = 0.5)$p.value, n_yes, n_total),
+    p_adj_bh = p.adjust(p_value, method = "BH"),
+    # significance stars based on adjusted p-values (common journal convention)
+    sig = case_when(
+      p_adj_bh < 0.001 ~ "***",
+      p_adj_bh < 0.01  ~ "**",
+      p_adj_bh < 0.05  ~ "*",
+      TRUE             ~ "ns"
+    ),
+    # direction (optional but useful in interpretation)
+    direction = case_when(
+      pct_yes > 50 ~ "Above 50%",
+      pct_yes < 50 ~ "Below 50%",
+      TRUE         ~ "Equal 50%"
+    )
+  ) %>%
+  arrange(desc(pct_yes))
+
+# 2) Journal-ready preference table WITH significance info
+pref_table <- pref_stats %>%
+  transmute(
+    Method,
+    `Yes (n)` = n_yes,
+    `Non-missing (n)` = n_total,
+    `Yes (%) [95% CI]` = sprintf("%.1f [%.1f–%.1f]", pct_yes, ci_low, ci_high),
+    `BH adj. p` = signif(p_adj_bh, 3),
+    Sig = sig,
+    Direction = direction
+  )
+
+
+# 11) Export outputs
+if (!dir.exists("outputs")) dir.create("outputs")
+readr::write_csv(pref_summary, "outputs/meat_preparation_preference_summary.csv")
+readr::write_csv(binom_results, "outputs/meat_preparation_binomial_tests.csv")
+ggsave("outputs/meat_preparation_preference_bar_chart.png", p1, width = 9, height = 5, dpi = 300)
+ggsave("outputs/meat_preparation_yes_no_distribution.png", p2, width = 9, height = 5, dpi = 300)
+
+# 12) Reporting text
+cat("\nREPORTING TEXT (copy into report):\n")
+cat(sprintf("Sample size: %d respondents.\n", n_respondents))
+cat(sprintf("Most preferred method: %s (%.1f%%).\n",
+            as.character(pref_summary$method[1]), pref_summary$`Yes (%)`[1]))
+cat(sprintf("Least preferred method: %s (%.1f%%).\n",
+            as.character(pref_summary$method[nrow(pref_summary)]),
+            pref_summary$`Yes (%)`[nrow(pref_summary)]))
+cat("Note: Multiple responses allowed; percentages do not sum to 100%.\n")
+
+## =========================================================
+## END
+## =========================================================
+
