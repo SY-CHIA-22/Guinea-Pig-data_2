@@ -1,19 +1,25 @@
+
 ############################################################
-## Organ weight analysis (LONG format)
-## Columns required: diet, sex, replicate, organ, weight
-## Units: grams (g)
-## Design: Diet (T1–T4) x Sex (F/M); 2F + 2M per diet
-## Output:
-##  - Per-organ inference: LM (Type III ANOVA) + diagnostics
-##  - Automatic fallback to ART (nonparametric factorial ANOVA)
-##  - Post-hoc: Diet within Sex (Tukey) + compact letter display
-##  - Journal-ready plots:
-##      (1) Raw points + model-based marginal means ± 95% CI + letters
-##      (2) Distribution view (violin + box + points)
+## Organ weights (g) — SMALL n, Sex pooled (recommended)
+## Data format (LONG): diet, sex, replicate, organ, weight
+## Diets: T1 (control), T2–T4
+## Goal (high-impact, small n): Estimation + bootstrap uncertainty
+##
+## Outputs:
+## 1) Tables:
+##    - Summary means per diet/organ (n, mean, SD)
+##    - Effect vs control (T1): Δg and %Δ with bootstrap 95% CI
+## 2) Journal-ready figures:
+##    - Fig 1: Raw points + mean ± bootstrap 95% CI (per organ)
+##    - Fig 2: Forest plot of Δ vs T1 (per organ)
+##
+## Notes:
+## - Sex is retained only as metadata (not used in models)
+## - Robust to very small sample sizes (n=4 per diet when pooled)
 ############################################################
 
 ## ---- 0) Packages ----
-req <- c("tidyverse","readr","readxl","janitor","car","emmeans","multcompView","ARTool","broom")
+req <- c("tidyverse","readr","readxl","janitor","scales")
 to_install <- req[!req %in% rownames(installed.packages())]
 if(length(to_install) > 0) install.packages(to_install, dependencies = TRUE)
 
@@ -21,27 +27,15 @@ library(tidyverse)
 library(readr)
 library(readxl)
 library(janitor)
-library(car)
-library(emmeans)
-library(multcompView)
-library(ARTool)
-library(broom)
+library(scales)
+
+set.seed(123)  # reproducible bootstrap
 
 ## ---- 1) Load data ----
-## Option A: CSV
-## dat_raw <- read_csv("organ_weights.csv") %>% clean_names()
-##
-## Option B: Excel
-## dat_raw <- read_excel("organ_weights.xlsx", sheet = 1) %>% clean_names()
-##
-## Option C: already in R
-## dat_raw <- your_data %>% clean_names()
+setwd("C:/Guinea-Pig-data_2/Data")
+dat_raw <- read_excel("GP2_Organweight.xlsx") %>% clean_names()
 
-## ---------- EDIT THIS LINE ----------
-dat_raw <- dat_raw %>% clean_names()
-## -----------------------------------
-
-## ---- 2) Validate & standardize ----
+## ---- 2) Validate + clean ----
 needed <- c("diet","sex","replicate","organ","weight")
 missing_cols <- setdiff(needed, names(dat_raw))
 if(length(missing_cols) > 0){
@@ -50,156 +44,193 @@ if(length(missing_cols) > 0){
 
 dat <- dat_raw %>%
   transmute(
-    diet      = as.factor(diet),
+    diet      = as.character(diet),
     sex       = case_when(
       str_to_lower(as.character(sex)) %in% c("m","male") ~ "M",
       str_to_lower(as.character(sex)) %in% c("f","female") ~ "F",
       TRUE ~ as.character(sex)
-    ) %>% factor(levels = c("F","M")),
-    replicate = as.factor(replicate),
-    organ     = as.factor(str_squish(str_replace_all(as.character(organ), "_", " "))),
+    ),
+    replicate = as.character(replicate),
+    organ     = str_squish(str_replace_all(as.character(organ), "_", " ")),
     weight_g  = suppressWarnings(as.numeric(weight))
   ) %>%
-  filter(!is.na(diet), !is.na(sex), !is.na(replicate), !is.na(organ), !is.na(weight_g))
+  filter(!is.na(diet), !is.na(organ), !is.na(weight_g)) %>%
+  mutate(
+    diet = factor(diet),
+    sex  = factor(sex),
+    organ = factor(organ)
+  )
 
-## Force Diet order if it looks like T1..T4
-if(all(c("T1","T2","T3","T4") %in% unique(as.character(dat$diet)))){
-  dat <- dat %>% mutate(diet = factor(diet, levels = c("T1","T2","T3","T4")))
+## Enforce diet order with T1 as control if present
+diet_levels <- levels(dat$diet)
+if("T1" %in% diet_levels){
+  new_levels <- c("T1", setdiff(diet_levels, "T1"))
+  dat <- dat %>% mutate(diet = factor(diet, levels = new_levels))
 }
 
-## Basic check: expected counts by Diet x Sex
-counts <- dat %>% count(diet, sex, name = "n_obs")
-print(counts)
+## Quick sample-size check (sex pooled)
+cat("\nCounts by diet (sex pooled):\n")
+print(dat %>% count(diet, name = "n") %>% arrange(diet))
 
-## ---- 3) Analysis helpers ----
-check_assumptions <- function(df){
-  # LM model for one organ
-  fit <- lm(weight_g ~ diet * sex, data = df)
-  
-  shap_p <- tryCatch(shapiro.test(residuals(fit))$p.value, error = function(e) NA_real_)
-  
-  df2 <- df %>% mutate(group = interaction(diet, sex, drop = TRUE))
-  lev_p <- tryCatch(car::leveneTest(weight_g ~ group, data = df2)[["Pr(>F)"]][1],
-                    error = function(e) NA_real_)
-  
-  list(fit = fit, shapiro_p = shap_p, levene_p = lev_p)
+cat("\nCounts by diet x sex (for reporting only):\n")
+print(dat %>% count(diet, sex, name = "n") %>% arrange(diet, sex))
+
+cat("\nCounts by organ x diet:\n")
+print(dat %>% count(organ, diet, name = "n") %>% arrange(organ, diet))
+
+## ---- 3) Bootstrap helpers ----
+boot_ci_mean <- function(x, R = 10000, conf = 0.95){
+  x <- x[is.finite(x)]
+  n <- length(x)
+  if(n < 2){
+    return(tibble(mean = mean(x), lo = NA_real_, hi = NA_real_, n = n))
+  }
+  boots <- replicate(R, mean(sample(x, size = n, replace = TRUE)))
+  alpha <- (1 - conf) / 2
+  tibble(
+    mean = mean(x),
+    lo = unname(quantile(boots, probs = alpha, na.rm = TRUE)),
+    hi = unname(quantile(boots, probs = 1 - alpha, na.rm = TRUE)),
+    n = n
+  )
 }
 
-analyze_one_organ <- function(df_one, organ_name, alpha = 0.05){
-  # Choose LM if residuals ~normal AND homogeneous; otherwise ART
-  diag <- check_assumptions(df_one)
+boot_ci_diff_vs_control <- function(x_trt, x_ctl, R = 10000, conf = 0.95){
+  x_trt <- x_trt[is.finite(x_trt)]
+  x_ctl <- x_ctl[is.finite(x_ctl)]
+  nt <- length(x_trt); nc <- length(x_ctl)
+  if(nt < 2 || nc < 2){
+    return(tibble(diff = mean(x_trt) - mean(x_ctl), lo = NA_real_, hi = NA_real_, nt = nt, nc = nc))
+  }
+  boots <- replicate(R, mean(sample(x_trt, nt, TRUE)) - mean(sample(x_ctl, nc, TRUE)))
+  alpha <- (1 - conf) / 2
+  tibble(
+    diff = mean(x_trt) - mean(x_ctl),
+    lo = unname(quantile(boots, probs = alpha, na.rm = TRUE)),
+    hi = unname(quantile(boots, probs = 1 - alpha, na.rm = TRUE)),
+    nt = nt, nc = nc
+  )
+}
+
+## ---- 4) Summaries: means + bootstrap CI (per organ x diet) ----
+sum_mean_ci <- dat %>%
+  group_by(organ, diet) %>%
+  summarise(
+    tmp = list(boot_ci_mean(weight_g, R = 10000, conf = 0.95)),
+    .groups = "drop"
+  ) %>%
+  unnest(tmp) %>%
+  rename(mean_g = mean, ci_lo = lo, ci_hi = hi)
+
+sum_sd <- dat %>%
+  group_by(organ, diet) %>%
+  summarise(
+    sd_g = sd(weight_g, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+summary_table <- sum_mean_ci %>%
+  left_join(sum_sd, by = c("organ","diet")) %>%
+  arrange(organ, diet)
+
+cat("\n=== Summary table (means ± bootstrap 95% CI) ===\n")
+print(summary_table)
+
+
+## ---- Bootstrap helper functions (MUST be defined first) ----
+
+boot_ci_mean <- function(x, R = 10000, conf = 0.95){
+  x <- x[is.finite(x)]
+  n <- length(x)
+  if(n < 2){
+    return(tibble(mean = mean(x), lo = NA_real_, hi = NA_real_, n = n))
+  }
+  boots <- replicate(R, mean(sample(x, size = n, replace = TRUE)))
+  alpha <- (1 - conf) / 2
+  tibble(
+    mean = mean(x),
+    lo = unname(quantile(boots, probs = alpha, na.rm = TRUE)),
+    hi = unname(quantile(boots, probs = 1 - alpha, na.rm = TRUE)),
+    n = n
+  )
+}
+
+boot_ci_diff_vs_control <- function(x_trt, x_ctl, R = 10000, conf = 0.95){
+  x_trt <- x_trt[is.finite(x_trt)]
+  x_ctl <- x_ctl[is.finite(x_ctl)]
   
-  use_lm <- isTRUE(!is.na(diag$shapiro_p) && !is.na(diag$levene_p) &&
-                     diag$shapiro_p >= alpha && diag$levene_p >= alpha)
+  nt <- length(x_trt)
+  nc <- length(x_ctl)
   
-  if(use_lm){
-    model_type <- "LM (Type III ANOVA)"
-    fit <- diag$fit
-    
-    anova_tab <- car::Anova(fit, type = 3) %>%
-      broom::tidy() %>%
-      mutate(organ = organ_name, model = model_type)
-    
-    # EMMs: Diet within each Sex
-    emm <- emmeans(fit, ~ diet | sex)
-    emm_tab <- broom::tidy(emm) %>%
-      mutate(organ = organ_name, model = model_type)
-    
-    # Letters (Diet comparisons within Sex)
-    cld_tab <- multcomp::cld(emm, Letters = letters, adjust = "tukey") %>%
-      as.data.frame() %>%
-      mutate(
-        organ = organ_name,
-        model = model_type,
-        .group = str_squish(.group)
-      ) %>%
-      rename(letter = .group)
-    
-  } else {
-    model_type <- "ART (nonparametric factorial ANOVA)"
-    fit_art <- ARTool::art(weight_g ~ diet * sex, data = df_one)
-    
-    anova_tab <- anova(fit_art) %>%
-      broom::tidy() %>%
-      mutate(organ = organ_name, model = model_type)
-    
-    # EMMs from aligned model; artlm enables emmeans for interaction
-    fit_artlm <- ARTool::artlm(fit_art, "diet:sex")
-    emm <- emmeans(fit_artlm, ~ diet | sex)
-    
-    emm_tab <- broom::tidy(emm) %>%
-      mutate(organ = organ_name, model = model_type)
-    
-    cld_tab <- multcomp::cld(emm, Letters = letters, adjust = "tukey") %>%
-      as.data.frame() %>%
-      mutate(
-        organ = organ_name,
-        model = model_type,
-        .group = str_squish(.group)
-      ) %>%
-      rename(letter = .group)
+  if(nt < 2 || nc < 2){
+    return(tibble(
+      diff = mean(x_trt) - mean(x_ctl),
+      lo = NA_real_, hi = NA_real_,
+      nt = nt, nc = nc
+    ))
   }
   
-  diag_tab <- tibble(
-    organ = organ_name,
-    shapiro_p = diag$shapiro_p,
-    levene_p  = diag$levene_p,
-    chosen_model = ifelse(use_lm, "LM", "ART")
+  boots <- replicate(
+    R,
+    mean(sample(x_trt, nt, replace = TRUE)) -
+      mean(sample(x_ctl, nc, replace = TRUE))
   )
   
-  list(anova = anova_tab, emmeans = emm_tab, cld = cld_tab, diagnostics = diag_tab)
+  alpha <- (1 - conf) / 2
+  
+  tibble(
+    diff = mean(x_trt) - mean(x_ctl),
+    lo = unname(quantile(boots, probs = alpha, na.rm = TRUE)),
+    hi = unname(quantile(boots, probs = 1 - alpha, na.rm = TRUE)),
+    nt = nt, nc = nc
+  )
 }
 
-## ---- 4) Run per-organ analyses ----
-organs <- levels(dat$organ)
 
-res_list <- lapply(organs, function(o){
-  analyze_one_organ(dat %>% filter(organ == o), organ_name = as.character(o), alpha = 0.05)
-})
+## ---- 5) Effects vs control (T1): Δg and %Δ with bootstrap 95% CI ----
+if(!("T1" %in% levels(dat$diet))){
+  stop("Diet level 'T1' (control) not found in diet column. Please ensure control is labeled T1.")
+}
 
-anova_all <- bind_rows(lapply(res_list, `[[`, "anova"))
-emm_all   <- bind_rows(lapply(res_list, `[[`, "emmeans"))
-cld_all   <- bind_rows(lapply(res_list, `[[`, "cld"))
-diag_all  <- bind_rows(lapply(res_list, `[[`, "diagnostics"))
+effects_vs_T1 <- dat %>%
+  group_by(organ) %>%
+  group_modify(~{
+    df <- .x
+    x_ctl <- df %>% filter(diet == "T1") %>% pull(weight_g)
+    m_ctl <- mean(x_ctl, na.rm = TRUE)
+    
+    diets_other <- levels(df$diet)
+    diets_other <- diets_other[diets_other != "T1"]
+    
+    out <- map_dfr(diets_other, function(d){
+      x_trt <- df %>% filter(diet == d) %>% pull(weight_g)
+      bt <- boot_ci_diff_vs_control(x_trt, x_ctl, R = 10000, conf = 0.95)
+      
+      # percent difference (relative to control mean); bootstrap CI for percent
+      # derived from bootstrapped diffs / control mean (fixed) to keep stable at tiny n
+      pct <- 100 * (bt$diff / m_ctl)
+      pct_lo <- 100 * (bt$lo  / m_ctl)
+      pct_hi <- 100 * (bt$hi  / m_ctl)
+      
+      tibble(
+        diet = factor(d, levels = levels(df$diet)),
+        control_mean_g = m_ctl,
+        diff_g = bt$diff, diff_lo = bt$lo, diff_hi = bt$hi,
+        pct_diff = pct, pct_lo = pct_lo, pct_hi = pct_hi,
+        n_trt = bt$nt, n_ctl = bt$nc
+      )
+    })
+    out
+  }) %>%
+  ungroup() %>%
+  arrange(organ, diet)
 
-cat("\n=== Diagnostics (per organ) ===\n")
-print(diag_all)
+cat("\n=== Effects vs T1 (Δg and %Δ with bootstrap 95% CI) ===\n")
+print(effects_vs_T1)
 
-cat("\n=== ANOVA tables (per organ) ===\n")
-print(anova_all %>% arrange(organ, term))
-
-## Optional: save results
-# write_csv(diag_all,  "results_diagnostics.csv")
-# write_csv(anova_all, "results_anova_by_organ.csv")
-# write_csv(emm_all,   "results_emmeans_by_organ.csv")
-# write_csv(cld_all,   "results_letters_by_organ.csv")
-
-## ---- 5) Prepare plotting tables ----
-plot_raw <- dat %>%
-  mutate(
-    sex  = factor(sex, levels = c("F","M")),
-    diet = factor(diet, levels = levels(dat$diet))
-  )
-
-plot_emm <- emm_all %>%
-  mutate(
-    sex  = factor(sex, levels = c("F","M")),
-    diet = factor(diet, levels = levels(dat$diet))
-  ) %>%
-  left_join(
-    cld_all %>% select(organ, sex, diet, letter) %>%
-      mutate(
-        sex  = factor(sex, levels = c("F","M")),
-        diet = factor(diet, levels = levels(dat$diet))
-      ),
-    by = c("organ","sex","diet")
-  ) %>%
-  group_by(organ, sex) %>%
-  mutate(
-    # Put letters just above the upper CI
-    letter_y = max(conf.high, na.rm = TRUE) + 0.05 * diff(range(c(conf.low, conf.high), na.rm = TRUE))
-  ) %>%
-  ungroup()
+## Optional: save tables
+write_csv(summary_table, "Table_OrganWeights_SummaryMeans_CI.csv")
+write_csv(effects_vs_T1, "Table_OrganWeights_Effects_vs_T1.csv")
 
 ## ---- 6) Journal-ready theme ----
 theme_journal <- theme_classic(base_size = 12) +
@@ -208,73 +239,196 @@ theme_journal <- theme_classic(base_size = 12) +
     strip.text = element_text(face = "bold"),
     axis.title = element_text(face = "bold"),
     axis.text.x = element_text(face = "bold"),
-    legend.position = "top",
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 10),
     panel.grid.major.y = element_line(colour = "grey92", linewidth = 0.3),
     panel.grid.major.x = element_blank(),
-    plot.title = element_text(face = "bold")
+    legend.position = "none"
   )
 
-## ---- 7) FIGURE 1 (Main): Raw points + EMM ± 95% CI + letters ----
-p_main <- ggplot() +
+## ---- 7) FIGURE 1: Raw points + mean ± bootstrap 95% CI (per organ) ----
+p1 <- ggplot() +
   geom_point(
-    data = plot_raw,
+    data = dat,
     aes(x = diet, y = weight_g),
     position = position_jitter(width = 0.12, height = 0),
-    alpha = 0.70,
+    alpha = 0.75,
     size = 2.1
   ) +
   geom_linerange(
-    data = plot_emm,
-    aes(x = diet, ymin = conf.low, ymax = conf.high),
+    data = summary_table,
+    aes(x = diet, ymin = ci_lo, ymax = ci_hi),
     linewidth = 0.9
   ) +
   geom_point(
-    data = plot_emm,
-    aes(x = diet, y = estimate),
+    data = summary_table,
+    aes(x = diet, y = mean_g),
     size = 3.1
   ) +
-  geom_text(
-    data = plot_emm,
-    aes(x = diet, y = letter_y, label = letter),
-    fontface = "bold",
-    size = 3.6,
-    vjust = 0
-  ) +
-  facet_grid(sex ~ organ, scales = "free_y") +
+  facet_wrap(~ organ, scales = "free_y", ncol = 3) +
   labs(
-    x = "Diet (Treatment)",
+    x = "Diet (T1 = control)",
     y = "Organ weight (g)",
-    title = "Internal organ weights by diet and sex",
-    subtitle = "Points = individual animals; dots/lines = marginal means ± 95% CI; letters = Tukey groups within each sex"
+    title = "Internal organ weights by diet (sex pooled)",
+    subtitle = "Points = individual animals; dots/lines = mean ± bootstrap 95% CI (estimation-focused)"
   ) +
   theme_journal
 
-print(p_main)
+print(p1)
 
-## ---- 8) FIGURE 2 (Optional): Violin + box + points (raw distribution) ----
-p_dist <- ggplot(plot_raw, aes(x = diet, y = weight_g)) +
-  geom_violin(trim = FALSE, alpha = 0.25) +
-  geom_boxplot(width = 0.22, outlier.shape = NA, linewidth = 0.55) +
-  geom_point(position = position_jitter(width = 0.12, height = 0), alpha = 0.75, size = 2.0) +
-  facet_grid(sex ~ organ, scales = "free_y") +
+## ---- 8) FIGURE 2: Forest plot of Δ vs T1 (per organ) ----
+## Put organs in a nice order (by mean control weight)
+organ_order <- dat %>%
+  filter(diet == "T1") %>%
+  group_by(organ) %>%
+  summarise(m = mean(weight_g, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(m)) %>%
+  pull(organ) %>% as.character()
+
+forest_df <- effects_vs_T1 %>%
+  mutate(
+    organ = factor(as.character(organ), levels = organ_order),
+    diet  = factor(as.character(diet), levels = setdiff(levels(dat$diet), "T1"))
+  )
+
+p2 <- ggplot(forest_df, aes(y = organ, x = diff_g)) +
+  geom_vline(xintercept = 0, linewidth = 0.7) +
+  geom_linerange(aes(xmin = diff_lo, xmax = diff_hi), linewidth = 0.9) +
+  geom_point(size = 2.8) +
+  facet_wrap(~ diet, nrow = 1, scales = "free_x") +
   labs(
-    x = "Diet (Treatment)",
-    y = "Organ weight (g)",
-    title = "Organ weight distributions (raw data)"
+    x = expression(Delta~"Organ weight vs T1 (g)"),
+    y = NULL,
+    title = "Diet effects relative to control (T1)",
+    subtitle = "Mean difference ± bootstrap 95% CI; values > 0 indicate heavier organs than T1"
   ) +
-  theme_journal
+  theme_journal +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(face = "bold"),
+    axis.text.y = element_text(face = "bold")
+  )
 
-print(p_dist)
+print(p2)
 
-## ---- 9) Save high-res (optional) ----
-# ggsave("Fig1_OrganWeights_EMM_CI.tiff", p_main, width = 14, height = 7, dpi = 600, compression = "lzw")
-# ggsave("Fig2_OrganWeights_Distribution.tiff", p_dist, width = 14, height = 7, dpi = 600, compression = "lzw")
+## ---- 9) Save high-resolution outputs (optional) ----
+ggsave("Fig1_OrganWeights_Estimation.tiff", p1, width = 10.5, height = 8.0, dpi = 600, compression = "lzw")
+ggsave("Fig2_OrganWeights_Forest_DeltaVsT1.pdf", p2, width = 12.5, height = 4.8, dpi = 600)
 
-############################################################
-## Notes:
-## 1) Your design is very small (n=2 per sex per diet), so
-##    power is limited; the plots are often more informative.
-## 2) The code compares Diet levels within each Sex (Tukey).
-##    If you prefer comparing Sex within each Diet, I can
-##    swap the emmeans formula to: ~ sex | diet
-############################################################
+cat("\nDone. Recommended reporting: emphasize effect sizes + bootstrap CI; treat any p-values (if added) as exploratory.\n")
+
+
+
+
+## =========================================================
+## Color upgrade (journal-friendly):
+## - Raw points: neutral grey
+## - Mean points: colored by Diet (T1–T4)
+## - CIs: darker grey/black for clarity
+## - Forest plot: points + CIs colored by Diet facet (optional)
+## =========================================================
+
+## ---- Define a clean, color-blind friendly palette (Okabe–Ito) ----
+diet_pal <- c(
+  "T1" = "#000000",  # control: black
+  "T2" = "#0072B2",  # blue
+  "T3" = "#009E73",  # green
+  "T4" = "#D55E00"   # orange
+)
+
+## ---- 7) FIGURE 1: Raw points + colored MEANS ± bootstrap 95% CI ----
+p1 <- ggplot() +
+  # Raw individual animals (neutral)
+  geom_point(
+    data = dat,
+    aes(x = diet, y = weight_g),
+    position = position_jitter(width = 0.12, height = 0),
+    alpha = 0.55,
+    size = 2.0,
+    colour = "grey35"
+  ) +
+  # Bootstrap CI (neutral but strong)
+  geom_linerange(
+    data = summary_table,
+    aes(x = diet, ymin = ci_lo, ymax = ci_hi),
+    linewidth = 0.9,
+    colour = "grey10"
+  ) +
+  # Mean point (COLORED by Diet)
+  geom_point(
+    data = summary_table,
+    aes(x = diet, y = mean_g, colour = diet),
+    size = 3.6
+  ) +
+  # Optional: add a ring around means to pop on busy panels
+  geom_point(
+    data = summary_table,
+    aes(x = diet, y = mean_g),
+    size = 4.2,
+    shape = 21,
+    stroke = 0.9,
+    fill = NA,
+    colour = "white"
+  ) +
+  facet_wrap(~ organ, scales = "free_y", ncol = 3) +
+  scale_colour_manual(values = diet_pal, drop = FALSE) +
+  labs(
+    x = "Diet (T1 = control)",
+    y = "Organ weight (g)",
+    title = "Internal organ weights by diet (sex pooled)",
+    subtitle = "Grey points = individuals; colored dots = mean; bars = bootstrap 95% CI"
+  ) +
+  theme_journal +
+  theme(legend.position = "top")
+
+print(p1)
+
+## ---- 8) FIGURE 2: Forest plot of Δ vs T1 (color by Diet) ----
+## Put organs in a nice order (by mean control weight)
+organ_order <- dat %>%
+  filter(diet == "T1") %>%
+  group_by(organ) %>%
+  summarise(m = mean(weight_g, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(m)) %>%
+  pull(organ) %>% as.character()
+
+forest_df <- effects_vs_T1 %>%
+  mutate(
+    organ = factor(as.character(organ), levels = organ_order),
+    diet  = factor(as.character(diet), levels = setdiff(levels(dat$diet), "T1"))
+  )
+
+p2 <- ggplot(forest_df, aes(y = organ, x = diff_g, colour = diet)) +
+  geom_vline(xintercept = 0, linewidth = 0.7, colour = "grey25") +
+  geom_linerange(aes(xmin = diff_lo, xmax = diff_hi), linewidth = 0.95) +
+  geom_point(size = 3.0) +
+  facet_wrap(~ diet, nrow = 1, scales = "free_x") +
+  scale_colour_manual(values = diet_pal, drop = FALSE) +
+  labs(
+    x = expression(Delta~"Organ weight vs T1 (g)"),
+    y = NULL,
+    title = "Diet effects relative to control (T1)",
+    subtitle = "Point = mean difference; line = bootstrap 95% CI"
+  ) +
+  theme_journal +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(face = "bold"),
+    axis.text.y = element_text(face = "bold")
+  )
+
+print(p2)
+
+## ---- 9) Save high-resolution outputs (optional) ----
+ggsave("Fig1_OrganWeights_Estimation.tiff", p1, width = 10.5, height = 8.0, dpi = 600, compression = "lzw")
+ggsave("Fig2_OrganWeights_Forest_DeltaVsT1.pdf", p2, width = 12.5, height = 4.8, dpi = 600)
+
+ggsave("Fig1_OrganWeights_Estimation.pdf", p1, width = 10.5, height = 8.0, dpi = 600)
+ggsave("Fig2_OrganWeights_Forest_DeltaVsT1.tiff", p2, width = 12.5, height = 4.8, dpi = 600, compression = "lzw")
+
+cat("\nDone. Colored mean points (by diet) added; raw points kept neutral for readability.\n")
+
+
+
+
+
