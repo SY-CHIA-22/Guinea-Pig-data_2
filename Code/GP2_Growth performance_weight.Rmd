@@ -219,21 +219,6 @@ ggplot(growth_summary,
 
 ```
 
-##3.2 Individual “spaghetti” plots by Diet
-
-```{r}
-ggplot(df, aes(x = Week, y = Weight,
-group = AnimalID, colour = Diet)) +
-geom_line(alpha = 0.3) +
-theme_bw(base_size = 12) +
-labs(
-title = "Individual growth trajectories by diet",
-x = "Week",
-y = "Body weight"
-)
-
-```
-
 #4. Mixed Model for Longitudinal Weight
 
 ```{r}
@@ -241,6 +226,13 @@ y = "Body weight"
 #Response: Weight
 #Fixed effects: Diet * Week_c + Sex + InitialWeight
 #Random effect: (1 | AnimalID) to account for repeated measures
+
+remove.packages(c("lme4", "Matrix"))
+
+install.packages("Matrix")
+install.packages("lme4")
+library(Matrix)
+library(lme4)
 
 mod1 <- lmer(
 Weight ~ Diet * Week_c + Sex + InitialWeight +
