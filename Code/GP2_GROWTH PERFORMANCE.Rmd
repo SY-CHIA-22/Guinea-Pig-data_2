@@ -82,8 +82,6 @@ dat <- dat %>%
   ) %>%
   filter(!is.na(diet), !is.na(sex), !is.na(ini_weight))
 
-# OPTIONAL: set explicit diet order if you want (edit to match your study)
-# dat <- dat %>% mutate(diet = fct_relevel(diet, "D1","D2","D3","D4"))
 
 glimpse(dat)
 summary(dat)
@@ -364,13 +362,9 @@ ggsave(
 
 
 
+# 4. ################# Feed intake #######################
 
 
-
-
-
-
-# 4. Feed intake #######################
 library(readxl)
 library(janitor)
 setwd("C:/Guinea-Pig-data_2/Data")
