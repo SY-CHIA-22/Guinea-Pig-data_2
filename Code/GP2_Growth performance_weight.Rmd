@@ -48,6 +48,13 @@ renv::snapshot()
 # 0. Packages and Data Import
 
 ```{r}
+
+dir.create("C:/Rlibs", showWarnings = FALSE, recursive = TRUE)
+
+file.edit("~/.Renviron")
+
+
+
 # Install once if needed (uncomment and run):
 # install.packages(c("tidyverse","readxl","lme4","lmerTest",
 # "emmeans","effectsize"))
@@ -160,7 +167,7 @@ se   = sd / sqrt(n),
 
 ggplot(growth_summary,
 aes(x = Week, y = mean, colour = Diet, group = Diet)) +
-geom_line(size = 1) +
+geom_line(linewidth = 1) +
 geom_ribbon(aes(ymin = mean - se, ymax = mean + se, fill = Diet),
 alpha = 0.2, colour = NA) +
 facet_wrap(~ Sex) +
@@ -196,7 +203,7 @@ cb_palette <- c(
 
 ggplot(growth_summary,
        aes(x = Week, y = mean, colour = Diet, group = Diet)) +
-  geom_line(size = 1.1) +
+  geom_line(linewidth = 1.1) +
   geom_ribbon(aes(ymin = mean - se, ymax = mean + se, fill = Diet),
               alpha = 0.20, colour = NA) +
   facet_wrap(~ Sex, ncol = 2) +
@@ -222,12 +229,29 @@ ggplot(growth_summary,
 #4. Mixed Model for Longitudinal Weight
 
 ```{r}
-#We fit a linear mixed-effects model:
-#Response: Weight
-#Fixed effects: Diet * Week_c + Sex + InitialWeight
-#Random effect: (1 | AnimalID) to account for repeated measures
+# Ensure df is a plain data.frame
+df <- as.data.frame(df)
 
-remove.packages(c("lme4", "Matrix"))
+# Check required columns
+needed <- c("Weight","Diet","Week_c","Sex","InitialWeight","AnimalID")
+missing <- setdiff(needed, names(df))
+if(length(missing) > 0){
+  stop("Missing columns: ", paste(missing, collapse = ", "))
+}
+
+# Enforce correct types (critical for lmer)
+df <- df %>%
+  dplyr::mutate(
+    AnimalID      = factor(AnimalID),
+    Diet          = factor(Diet),
+    Sex           = factor(Sex),
+    Week_c        = as.numeric(Week_c),
+    Weight        = as.numeric(Weight),
+    InitialWeight = as.numeric(InitialWeight)
+  ) %>%
+  tidyr::drop_na(Weight, Diet, Week_c, Sex, InitialWeight, AnimalID)
+
+
 
 install.packages("Matrix")
 install.packages("lme4")
@@ -673,6 +697,359 @@ ggplot() +
   )
 
 
+
+
+
+
+#################################################
+
+## =========================================================
+## Guinea pig bodyweight analysis: clean + high-impact outputs
+## Baseline: InitialWeight ~ Diet * Sex (ART if needed)
+## Growth: Weight ~ Diet * Week_c + Sex + InitialWeight + (Week_c | AnimalID)
+## Figures: (1) baseline distribution + means, (2) model-based growth curves + CI
+## =========================================================
+
+## 1) Packages (install once if needed)
+# install.packages(c("tidyverse","readxl","lme4","lmerTest","emmeans","effectsize","performance","ARTool"))
+install.packages("janitor")
+library(janitor)
+library(tidyverse)
+library(readxl)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(effectsize)
+library(performance)
+library(ARTool)
+
+## 2) Read + clean (minimal, using your stated column names)
+setwd("C:/Guinea-Pig-data_2/Data")
+
+dat <- read_excel("gp2_bodyweight_v2.xlsx", na = c("NA","N/A","")) %>%
+  janitor::clean_names() %>%   # diet, id, week, sex, initial_weight, weekly_weight
+  
+  transmute(
+    Diet          = factor(diet),
+    ID            = factor(id),
+    week          = as.numeric(week),
+    Sex           = factor(sex),
+    InitialWeight = as.numeric(initial_weight),
+    Weight        = as.numeric(weekly_weight),
+    AnimalID      = factor(paste(Diet, ID, Sex, sep = "_"))
+  ) %>%
+  drop_na(Diet, ID, Week, Sex, InitialWeight, Weight, AnimalID) %>%
+  mutate(
+    Week_c = Week - mean(Week, na.rm = TRUE)
+  )
+
+# quick sanity
+count(dat, Diet)
+count(dat, Sex)
+length(unique(dat$AnimalID))
+
+## =========================================================
+## 3) BASELINE CHECK (InitialWeight)
+## =========================================================
+
+#initial weight data in this dataset are repeated to match weekly observations,
+#incomplete relative to the original allocation dataset,
+#used here as a covariate, not as a randomisation check.
+#Therefore, testing baseline balance using this reshaped dataset is statistically inappropriate.
+
+
+
+## =========================================================
+## 4) LONGITUDINAL GROWTH MODEL (mixed model)
+## =========================================================
+
+# One strong model (random intercept + random slope for week within animal)
+mod_g <- lmer(
+  Weight ~ Diet * Week_c + Sex + InitialWeight + (Week_c | AnimalID),
+  data = dat,
+  REML = FALSE
+)
+
+# Report-ready table: fixed effects + Type III ANOVA
+cat("\nGrowth model: fixed effects summary\n")
+print(summary(mod_g))
+
+cat("\nGrowth model: Type III tests (Diet, Week, Diet×Week etc.)\n")
+print(anova(mod_g, type = 3))
+
+# Optional: model quality checks (quick)
+# performance::check_model(mod_g)  # interactive plots
+
+# High-impact inference for growth: diet-specific slopes (g/week) and their comparisons
+emm_slopes <- emtrends(mod_g, specs = "Diet", var = "Week_c")
+emm_slopes_ci <- confint(emm_slopes)
+pairs_slopes  <- pairs(emm_slopes, adjust = "tukey")
+
+cat("\nDiet-specific growth slopes (g/week):\n")
+print(emm_slopes_ci)
+
+cat("\nPairwise comparisons of slopes (Tukey-adjusted):\n")
+print(pairs_slopes)
+
+
+## =========================================================
+## 5) JOURNAL-READY GROWTH FIGURE (model-based curves + 95% CI)
+## =========================================================
+
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(dplyr)
+library(ggplot2)
+
+## --- 0) Fit model (stable)
+mod_g <- lmer(
+  Weight ~ Diet * Week_c + Sex + InitialWeight + (1 + Week_c || AnimalID),
+  data = dat,
+  REML = FALSE,
+  control = lmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+## --- 1) Sequence of week values on centered scale
+week_seq <- seq(min(dat$Week_c, na.rm = TRUE),
+                max(dat$Week_c, na.rm = TRUE),
+                length.out = 120)
+
+week_mean <- mean(dat$Week, na.rm = TRUE)
+init_mean <- mean(dat$InitialWeight, na.rm = TRUE)
+
+## --- 2) Colour-blind friendly palette (Okabe–Ito)
+okabe_ito <- c("#0072B2","#009E73","#D55E00","#CC79A7","#56B4E9","#E69F00")
+diet_cols <- setNames(okabe_ito[seq_along(levels(dat$Diet))], levels(dat$Diet))
+
+## --- 3) Model-based curves with 95% CI using emmip() (robust)
+p_growth <- emmip(
+  mod_g,
+  Diet ~ Week_c | Sex,
+  at = list(Week_c = week_seq, InitialWeight = init_mean),
+  CIs = TRUE,
+  cov.reduce = FALSE
+) +
+  scale_colour_manual(values = diet_cols) +
+  scale_fill_manual(values = diet_cols) +
+  labs(x = "Week", y = "Body weight (g)") +
+  theme_classic(base_size = 14) +
+  theme(
+    legend.position = "top",
+    panel.grid = element_blank(),
+    strip.background = element_rect(fill = "white", colour = "black", linewidth = 0.6),
+    strip.text = element_text(face = "bold", size = 13),
+    axis.title = element_text(face = "bold"),
+    axis.text  = element_text(colour = "black")
+  ) +
+  ## relabel x-axis from centered Week_c back to Week
+  scale_x_continuous(
+    breaks = pretty(week_seq, n = 6),
+    labels = function(x) round(x + week_mean, 0)
+  )
+
+p_growth
+
+
+
+###################adjusted, sex-specific baseline (differences at initial weight adjusted)
+
+library(emmeans)
+library(ggplot2)
+
+# --- model already fitted as mod_g ---
+# mod_g <- lmer(Weight ~ Diet*Week_c + Sex + InitialWeight + (1 + Week_c || AnimalID), data=dat, ...)
+
+week_seq  <- seq(min(dat$Week_c, na.rm=TRUE), max(dat$Week_c, na.rm=TRUE), length.out = 120)
+week_mean <- mean(dat$Week, na.rm=TRUE)
+init_mean <- mean(dat$InitialWeight, na.rm=TRUE)
+
+# Okabe–Ito palette (colour-blind friendly)
+okabe_ito <- c("#0072B2","#009E73","#D55E00","#CC79A7","#56B4E9","#E69F00")
+diet_cols <- setNames(okabe_ito[seq_along(levels(dat$Diet))], levels(dat$Diet))
+
+# Get predictions across Week_c for each Diet × Sex
+emm_curve <- emmeans(
+  mod_g,
+  ~ Diet * Sex | Week_c,
+  at = list(Week_c = week_seq, InitialWeight = init_mean)
+)
+
+pred_df <- as.data.frame(summary(emm_curve, infer = TRUE)) %>%
+  # Sometimes emmeans returns week_c, not Week_c
+  dplyr::rename(Week_c = dplyr::any_of(c("Week_c","week_c"))) %>%
+  dplyr::mutate(Week = Week_c + week_mean)
+
+# Plot: same axes, sex shown by line type, diets by color, CI ribbons by sex
+p_sex_compare_corrected <- ggplot(
+  pred_df,
+  aes(
+    x = Week,
+    y = emmean,
+    colour = Diet,
+    linetype = Sex,
+    fill = Sex,
+    group = interaction(Diet, Sex)
+  )
+) +
+  geom_ribbon(
+    aes(ymin = lower.CL, ymax = upper.CL),
+    alpha = 0.15,
+    colour = NA
+  ) +
+  geom_line(linewidth = 1.15) +
+  scale_colour_manual(values = diet_cols) +
+  scale_linetype_manual(
+    values = c("FEMALES" = "solid", "MALES" = "dashed")
+  ) +
+  scale_fill_manual(
+    values = c("FEMALES" = "#F4A6A6", "MALES" = "#9ADBE8")
+  ) +
+  labs(
+    x = "Week",
+    y = "Body weight (g)",
+    linetype = "Sex",
+    fill = "Sex"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.title = element_text(face = "bold"),
+    axis.text  = element_text(colour = "black"),
+    legend.position = "top"
+  )
+
+p_sex_compare_corrected ## draft
+
+
+### improve figure#######################################
+### Remove the ribbons and allow only lines
+p_sex_compare_clean <- ggplot(
+  pred_df,
+  aes(x = Week, y = emmean, colour = Diet, linetype = Sex,
+      group = interaction(Diet, Sex))
+) +
+  geom_line(linewidth = 1.35) +
+  scale_colour_manual(values = diet_cols) +
+  scale_linetype_manual(values = c("FEMALES"="solid","MALES"="22")) +
+  labs(x="Week", y="Body weight (g)", colour="Diet", linetype="Sex") +
+  theme_classic(base_size = 14) +
+  theme(
+    legend.position="top",
+    legend.title = element_text(face="bold"),
+    axis.title = element_text(face="bold"),
+    panel.grid = element_blank()
+  )
+
+p_sex_compare_clean # best option
+
+
+
+p_final <- p_sex_compare_clean +
+  annotate(
+    "text",
+    x = min(pred_df$Week),
+    y = max(pred_df$emmean),
+    hjust = 0, vjust = 1,
+    size = 3.6,
+    label = "Mixed-effects model\nAdjusted for initial body weight\nSex effect: p < 0.001"
+  )
+
+ggsave(
+  filename = "Fig_growth_sex_adjusted.pdf",
+  plot     = p_final,
+  width    = 180,   # mm (typical journal column width)
+  height   = 120,   # mm
+  units    = "mm")
+
+
+summary(mod_g)$coef 
+fixef(mod_g) # proof that females were heavier following initial weight adjustment.
+
+
+
+############ plot reflect initial weights: Males started heavier than females - not main
+library(emmeans)
+library(dplyr)
+library(ggplot2)
+
+# 1) week grid on centered scale
+week_seq  <- seq(min(dat$Week_c, na.rm=TRUE), max(dat$Week_c, na.rm=TRUE), length.out = 120)
+week_mean <- mean(dat$Week, na.rm=TRUE)
+
+# 2) sex-specific mean initial weights (from your data)
+init_by_sex <- dat %>%
+  group_by(Sex) %>%
+  summarise(init_mean = mean(InitialWeight, na.rm = TRUE), .groups = "drop")
+
+# 3) get curves separately per sex, each evaluated at its own mean InitialWeight
+curve_list <- lapply(levels(dat$Sex), function(sx){
+
+  init_val <- init_by_sex$init_mean[init_by_sex$Sex == sx]
+
+  emm_sx <- emmeans(
+    mod_g,
+    ~ Diet | Week_c,
+    at = list(
+      Week_c = week_seq,
+      Sex = sx,
+      InitialWeight = init_val
+    )
+  )
+
+  as.data.frame(summary(emm_sx, infer = TRUE)) %>%
+    rename(Week_c = any_of(c("Week_c","week_c"))) %>%
+    mutate(
+      Sex = sx,
+      Week = Week_c + week_mean
+    )
+})
+
+curve_df <- bind_rows(curve_list)
+
+# 4) observed means (optional)
+obs_means <- dat %>%
+  group_by(Diet, Sex, Week) %>%
+  summarise(mean_w = mean(Weight, na.rm = TRUE), .groups = "drop")
+
+# 5) palette
+okabe_ito <- c("#0072B2","#009E73","#D55E00","#CC79A7","#56B4E9","#E69F00")
+diet_cols <- setNames(okabe_ito[seq_along(levels(dat$Diet))], levels(dat$Diet))
+
+# 6) Plot (same axes; males should now be above females, matching your data)
+p_growth2 <- ggplot(curve_df,
+                    aes(x = Week, y = emmean,
+                        colour = Diet, linetype = Sex,
+                        group = interaction(Diet, Sex))) +
+  geom_ribbon(aes(ymin = lower.CL, ymax = upper.CL, fill = Diet),
+              alpha = 0.12, colour = NA) +
+  geom_line(linewidth = 1.15) +
+  geom_point(data = obs_means,
+             aes(x = Week, y = mean_w, colour = Diet,
+                 group = interaction(Diet, Sex)),
+             inherit.aes = FALSE,
+             alpha = 0.20, size = 1.2) +
+  scale_colour_manual(values = diet_cols) +
+  scale_fill_manual(values = diet_cols) +
+  scale_linetype_manual(values = c("FEMALES" = "solid", "MALES" = "dashed")) +
+  labs(x = "Week", y = "Body weight (g)", linetype = "Sex", colour = "Diet", fill = "Diet") +
+  theme_classic(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.title = element_text(face = "bold"),
+    axis.text  = element_text(colour = "black"),
+    legend.position = "top"
+  )
+
+p_growth2
+
+
+
+
+
+
+
+############################################
 ```
 
 #7. Final Weight Analysis (ANCOVA) with Diagnostics
@@ -3269,6 +3646,10 @@ p_fcr_emm <- ggplot(emm_fcr_df,
   )
 
 p_fcr_emm
+
+
+updateR()
+
 
 
 ```
