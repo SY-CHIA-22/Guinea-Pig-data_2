@@ -697,10 +697,6 @@ ggplot() +
   )
 
 
-
-
-
-
 #################################################
 
 ## =========================================================
@@ -1046,24 +1042,50 @@ p_growth2
 
 
 
-
-
-
 ############################################
 ```
 
-#7. Final Weight Analysis (ANCOVA) with Diagnostics
-##7.1 Model: FinalWeight ~ Diet + Sex + InitialWeight
+# 7. Final Weight Analysis (ANCOVA) with Diagnostics
+## 7.1 Model: FinalWeight ~ Diet + Sex + InitialWeight
 
 ```{r}
 
+### Note that final weight data is derived from the main data set "gp2_bodyweight_v2" imported above (see section 0.1 chunk)
 final_mod <- lm(
 FinalWeight ~ Diet + Sex + InitialWeight,
 data = animal_growth
 )
 
 summary(final_mod)
-anova(final_mod)
+anova(final_mod) ## only sex and initialweight  are significantly different
+
+
+## export model-used data  (without NAs) - just for quick reference
+library(dplyr)
+
+pred_df <- model.frame(final_mod) %>%
+  mutate(
+    fitted   = fitted(final_mod),
+    residual = resid(final_mod)
+  )
+
+library(writexl)
+
+write_xlsx(
+  pred_df,
+  path = "FinalWeight_fitted_residuals.xlsx"
+)
+
+### Export original data unchanged (with NAs) - just for quick reference
+write_xlsx(
+  list(
+    "Raw_data_with_NAs" = animal_growth,
+    "Model_complete_cases" = model.frame(final_mod)
+  ),
+  path = "FinalWeight_data_full_and_model.xlsx"
+)
+
+
 
 ```
 
@@ -1084,6 +1106,13 @@ pairs(emm_final, adjust = "tukey")
 ##7.3 Diagnostics: base R plots
 
 ```{r}
+# The relationship between predictors and final body weight is adequately captured by the linear model, with no clear evidence of non-linearity.
+## Assumption of linearity is met
+# Model residuals are approximately normally distributed, with minor departures at the extremes that are unlikely to materially affect inference.Hence, Normality assumption is acceptable
+# The variance of residuals is approximately constant, indicating no major violation of the homoscedasticity assumption. Hence, Homoscedasticity is acceptable
+# No individual observations exert undue influence on model estimates.
+##No influential outliers
+
 par(mfrow = c(2, 2))
 plot(final_mod)
 par(mfrow = c(1, 1))
@@ -1479,74 +1508,159 @@ ggplot(animal_growth,
 
 
 ####################
+
 #Adjusted final weight
 
 library(tidyverse)
 library(emmeans)
 
-## 1. Fit ANCOVA with Diet × Sex + InitialWeight
+## 1) Fit ANCOVA with Diet × Sex + InitialWeight
 final_mod_sex <- lm(
   FinalWeight ~ Diet * Sex + InitialWeight,
   data = animal_growth
 )
 
-## 2. Estimated marginal means: Diet within Sex
+## 2) Type III-like ANOVA table (use car::Anova if you prefer Type III)
+# Base R anova() is sequential (Type I). For factorial ANCOVA, Type II/III is often preferred.
+# If you want Type II/III, uncomment the car line.
+# library(car)
+# an_tab <- as.data.frame(car::Anova(final_mod_sex, type = 3))
+
+an_tab <- as.data.frame(anova(final_mod_sex)) %>%
+  tibble::rownames_to_column("term")
+
+## 3) Helper to safely pull F and p columns (works across table formats)
+get_col <- function(df, patterns) {
+  nm <- names(df)
+  hit <- unique(unlist(lapply(patterns, function(p) grep(p, nm, value = TRUE))))
+  if (length(hit) < 1) stop("Could not find expected column in ANOVA table.")
+  hit[1]
+}
+
+F_col <- get_col(an_tab, c("^F$","F value","F\\.value"))
+p_col <- get_col(an_tab, c("Pr\\(>F\\)","^p$","p-value","p\\.value"))
+
+## 4) Build a compact stats label (edit to your preferred terms)
+keep_terms <- c("Diet", "Sex", "Diet:Sex", "InitialWeight")
+
+stat_df <- an_tab %>%
+  filter(term %in% keep_terms) %>%
+  mutate(
+    F_val = .data[[F_col]],
+    p_val = .data[[p_col]],
+    term_lab = recode(term,
+                      "Diet" = "Diet",
+                      "Sex" = "Sex",
+                      "Diet:Sex" = "Diet×Sex",
+                      "InitialWeight" = "Initial wt")
+  )
+
+fmt_p <- function(p){
+  ifelse(is.na(p), "NA",
+         ifelse(p < 0.001, "<0.001", formatC(p, digits = 3, format = "f")))
+}
+
+stat_text <- paste0(
+  stat_df$term_lab,
+  ": F=", formatC(stat_df$F_val, digits = 2, format = "f"),
+  ", p=", fmt_p(stat_df$p_val),
+  collapse = "\n"
+)
+
+## 5) EMMs: Diet within Sex at mean InitialWeight
 emm_final_sex <- emmeans(
   final_mod_sex,
   ~ Diet | Sex,
-  cov.reduce = list(InitialWeight = mean)
+  at = list(InitialWeight = mean(animal_growth$InitialWeight, na.rm = TRUE))
 )
 
-## 3. Convert to data frame and check columns
-emm_df <- as.data.frame(emm_final_sex) %>%
-  rename(
-    lower = lower.CL,
-    upper = upper.CL
-  ) %>%
+emm_df <- as.data.frame(summary(emm_final_sex, infer = TRUE)) %>%
+  rename(lower = lower.CL, upper = upper.CL) %>%
   mutate(
     Sex  = factor(Sex),
     Diet = factor(Diet)
   )
 
-# Sanity check: Sex must be present
-str(emm_df)
-# Should show columns including: Diet, Sex, emmean, lower, upper, etc.
+## 6) Position annotation within each facet (top-left)
+ann_df <- emm_df %>%
+  group_by(Sex) %>%
+  summarise(
+    x = 1,  # leftmost diet (works if Diet levels are ordered)
+    y = max(upper, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(label = stat_text)
 
-## 4. Journal-ready plot (y-axis from 0)
-ggplot(emm_df,
-       aes(x = Diet, y = emmean, colour = Diet)) +
-  
-  # adjusted mean points
-  geom_point(size = 3) +
-  
-  # 95% confidence intervals
+## 7) Journal-ready plot (y-axis from 0) + statistics annotation
+p_final_weight <- ggplot(emm_df, aes(x = Diet, y = emmean, colour = Diet)) +
+
+  geom_point(size = 3.2) +
+
   geom_errorbar(aes(ymin = lower, ymax = upper),
-                width = 0.15, linewidth = 1) +
-  
-  # panel by sex
-  facet_wrap(~ Sex) +
-  
-  scale_colour_manual(values = cb_palette) +
-  scale_y_continuous(
-    limits = c(0, NA),
-    expand = expansion(mult = c(0, 0.05))
+                width = 0.15, linewidth = 0.9) +
+
+  facet_wrap(~ Sex, nrow = 1) +
+
+  # stats block (same text in each Sex panel)
+  geom_text(
+    data = ann_df,
+    aes(x = x, y = y, label = label),
+    inherit.aes = FALSE,
+    hjust = 0, vjust = 1,
+    size = 3.6,
+    colour = "black",
+    lineheight = 1.05
   ) +
-  theme_bw(base_size = 14) +
+
+  scale_colour_manual(values = cb_palette) +
+
+  # start y-axis at zero; keep some headroom for annotation
+  coord_cartesian(ylim = c(0, NA)) +
+  scale_y_continuous(expand = expansion(mult = c(0.02, 0.10))) +
+
+  theme_classic(base_size = 14) +
   theme(
-    legend.position    = "none",
-    strip.text         = element_text(size = 14, face = "bold"),
-    axis.title.x       = element_text(face = "bold"),
-    axis.title.y       = element_text(face = "bold"),
-    plot.title         = element_text(face = "bold", hjust = 0.5),
-    panel.grid.minor   = element_blank(),
-    panel.grid.major.x = element_blank()
+    legend.position = "none",
+    strip.background = element_rect(fill = "white", colour = "black", linewidth = 0.6),
+    strip.text = element_text(size = 13, face = "bold"),
+    axis.title.x = element_text(face = "bold"),
+    axis.title.y = element_text(face = "bold"),
+    axis.text = element_text(colour = "black"),
+    panel.grid = element_blank()
   ) +
   labs(
-    title    = "Adjusted final body weight of guinea pigs by diet and sex",
-    subtitle = "Means adjusted for initial body weight using ANCOVA",
-    x        = "Diet",
-    y        = "Final body weight (g, adjusted)"
+    x = "Diet",
+    y = "Final body weight (g; adjusted)"
   )
+
+p_final_weight
+
+# export
+ggsave(
+  filename = "Final_adjusted_body weight.pdf",
+  plot     = p_final_weight,
+  width    = 180,   # mm (typical journal column width)
+  height   = 120,   # mm
+  units    = "mm")
+
+
+# which is higher - male or female and by how much?
+library(emmeans)
+
+emm_sex <- emmeans(
+  final_mod_sex,
+  ~ Sex,
+  at = list(InitialWeight = mean(animal_growth$InitialWeight, na.rm = TRUE))
+)
+
+emm_sex
+
+sex_contrast <- contrast(emm_sex, method = "pairwise")
+sex_contrast
+
+
+
+
 
 ```
 
@@ -1714,18 +1828,13 @@ print(pB_adg_overall)
 # ------------------------------------------------------
 # 5️⃣ Save publication-quality image (600 dpi)
 # ------------------------------------------------------
-ggsave("Figure_ADG_Weekly_by_Diet_Buffered.png",
+ggsave("Figure_ADG_Weekly_by_Diet_Buffered.pdf",
        plot = pB_adg_overall,
        width = 10, height = 7, dpi = 600)
-
-
 
 # ==============================
 # ADG plotting with female/male panels
 # ==============================
-
-
-
 
 adg_plot_df <- adg_df %>%
   mutate(
@@ -1743,7 +1852,6 @@ adg_plot_df <- adg_df %>%
 
 
 # 3️⃣ Plot A: ADG vs week, faceted by sex (Females, Males)
-
 
 ######
 # -----------------------------
@@ -2176,346 +2284,423 @@ ggsave(
 
 
 
+
+##############################################################
+# MAIN ANALYSIS FOR ADG
+
+############################################################
+## GP2 ADG ANALYSIS (Weeks as replicates) — Sections 1 to 4
+############################################################
+
+## =========================
+## 1) Packages + Import Data
+## =========================
+library(tidyverse)
+library(readxl)
+library(car)
+library(emmeans)
+library(ARTool)
+
+# ---- Read + clean
+data_adg <- read_excel("GP2_ADG.xlsx", na = c("NA", "N/A", "")) %>%
+  rename(
+    Diet     = diet,
+    Sex      = sex,
+    Week     = week,
+    Mean_ADG = Mean_ADG,
+    SD_ADG   = SD_ADG,
+    SEM_ADG  = SEM_ADG,
+    N        = n
+  ) %>%
+  mutate(
+    Diet     = factor(Diet),
+    Sex      = factor(Sex, levels = c("F","M"), labels = c("Females","Males")),
+    Week     = as.numeric(Week),
+    Mean_ADG = as.numeric(Mean_ADG),
+    SD_ADG   = as.numeric(SD_ADG),
+    SEM_ADG  = as.numeric(SEM_ADG),
+    N        = as.integer(N)
+  ) %>%
+  drop_na(Diet, Sex, Week, Mean_ADG)
+
+glimpse(data_adg)
+
+
+## ===============================================
+## 2) Assumption checks (2-way model residuals)
+## ===============================================
+mod_adg_aov <- aov(Mean_ADG ~ Diet * Sex, data = data_adg)
+
+res_adg <- residuals(mod_adg_aov)
+shap_p  <- shapiro.test(res_adg)$p.value
+
+lev_p <- car::leveneTest(
+  Mean_ADG ~ interaction(Diet, Sex),
+  data = data_adg
+)[1, "Pr(>F)"]
+
+cat("\nBaseline diagnostics:\n")
+cat("  Shapiro p =", signif(shap_p, 4), "\n") # normal 
+cat("  Levene  p =", signif(lev_p, 4), "\n")# homogenous
+
+
+## ==========================================================
+## 3) Inference: ANOVA if OK, otherwise ART factorial ANOVA
+## ==========================================================
+assumptions_ok <- (shap_p > 0.05) && (lev_p > 0.05)
+
+if (assumptions_ok) {
+  cat("\nADG inference: 2-way ANOVA (Diet × Sex)\n")
+  an_tab <- anova(mod_adg_aov)
+  print(an_tab)
+
+  # Diet comparisons within each sex (Tukey)
+  emm <- emmeans(mod_adg_aov, ~ Diet | Sex)
+  print(emm)
+  print(pairs(emm, adjust = "tukey"))
+
+  fit_used <- "ANOVA"
+
+} else {
+  cat("\nADG inference: ART factorial ANOVA (robust)\n")
+  mod_adg_art <- ARTool::art(Mean_ADG ~ Diet * Sex, data = data_adg)
+  an_tab <- anova(mod_adg_art)
+  print(an_tab)
+
+  # Post-hoc Diet within Sex using aligned model for Diet:Sex
+  art_int <- ARTool::artlm(mod_adg_art, "Diet:Sex")
+  emm <- emmeans(art_int, ~ Diet | Sex)
+  print(emm)
+  print(pairs(emm, adjust = "tukey"))
+
+  fit_used <- "ART"
+}
+
+
+## ==========================================================
+## 4) Journal-ready figure + export (Weeks as replicates)
+## ==========================================================
+diet_palette <- c(
+  "T1" = "#E69F00",
+  "T2" = "#009E73",
+  "T3" = "#0072B2",
+  "T4" = "#CC79A7"
+)
+
+# Dynamic y padding so boxes/whiskers don't touch the x-axis
+y_max <- max(data_adg$Mean_ADG, na.rm = TRUE)
+y_pad <- 0.12 * y_max
+
+p_adg <- ggplot(data_adg, aes(x = Diet, y = Mean_ADG, fill = Diet)) +
+
+  geom_boxplot(
+    alpha = 0.92,
+    width = 0.62,
+    outlier.shape  = 21,
+    outlier.size   = 2.3,
+    outlier.stroke = 0.45,
+    outlier.fill   = "white",
+    colour         = "black",
+    linewidth      = 0.75
+  ) +
+
+  # mean dot
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    shape = 21,
+    size = 3.1,
+    fill = "white",
+    colour = "black",
+    stroke = 0.9
+  ) +
+
+  facet_wrap(~ Sex, nrow = 1) +
+
+  scale_fill_manual(values = diet_palette) +
+
+  # start at 0 + add headroom so geoms don't touch x-axis
+  coord_cartesian(ylim = c(0, y_max + y_pad), clip = "off") +
+  scale_y_continuous(expand = expansion(mult = c(0.03, 0.06))) +
+
+  theme_classic(base_size = 14) +
+  theme(
+    legend.position = "none",
+    panel.grid      = element_blank(),
+    strip.background = element_rect(fill = "white", colour = "black", linewidth = 0.6),
+    strip.text      = element_text(face = "bold", size = 13),
+    axis.title.x    = element_text(face = "bold", size = 13),
+    axis.title.y    = element_text(face = "bold", size = 13),
+    axis.text       = element_text(colour = "black", size = 11),
+    plot.margin     = margin(8, 10, 10, 10)
+  ) +
+  labs(
+    x = "Diet",
+    y = "Average daily gain (g/day)"
+  )
+
+print(p_adg)
+
+# ---- Export (PDF = best for journals; PNG 600 dpi also OK)
+ggsave(
+  filename = "GP2_ADG_boxplot.pdf",
+  plot     = p_adg,
+  width    = 8.5,
+  height   = 4.2,
+  device   = cairo_pdf
+)
+
+ggsave(
+  filename = "GP2_ADG_boxplot.png",
+  plot     = p_adg,
+  width    = 8.5,
+  height   = 4.2,
+  dpi      = 600,
+  bg       = "white"
+)
+
+cat("\nSaved: GP2_ADG_boxplot.pdf and GP2_ADG_boxplot.png\n")
+cat("Analysis route used:", fit_used, "\n")
+
+
 ```
 
-##ADFI data
+# 9. ADFI data
 
 ```{r}
-library(tidyverse)
-library(readxl)
 
-# Load your dataset
-df <- read_excel("GP2_Feedintake.xlsx",
-                 na = c("NA", "N/A", ""))
+############################################################
+## GP2 — ADFI ANALYSIS + JOURNAL-READY FIGURES (CLEAN SCRIPT)
+############################################################
 
-# Add week column
-df_with_week <- df %>%
-  mutate(
-    day = as.numeric(day),
-    week = ceiling(day / 7)   # Convert day to week number
-  ) %>%
-  arrange(week, day, diet, sex)
-
-# View final dataset
-print(df_with_week, n = 50)
-
-
-##############
-# Load required libraries
-library(tidyverse)
-library(readxl)
-
-# ----------------------------
-# 1️⃣ Load dataset
-# ----------------------------
-df <- read_excel(
-  "GP2_Feedintake.xlsx",
-  na = c("NA", "N/A", "")   # handle missing entries
-)
-
-# ----------------------------
-# 2️⃣ Prepare dataset: add week number
-# ----------------------------
-df_with_week <- df %>%
-  mutate(
-    # Ensure day column is numeric
-    day  = as.numeric(day),
-
-    # Convert to week number (e.g., days 1–7 = week 1)
-    week = ceiling(day / 7),
-
-    # Clean and standardize key columns
-    diet = factor(diet, levels = c("T1", "T2", "T3", "T4")),
-    sex  = case_when(
-      sex %in% c("F", "Female", "FEMALES") ~ "F",
-      sex %in% c("M", "Male", "MALES")     ~ "M",
-      TRUE ~ as.character(sex)
-    ),
-    sex = factor(sex, levels = c("F", "M"))
-  ) %>%
-  arrange(week, day, diet, sex)
-
-# ----------------------------
-# 3️⃣ Print complete dataset
-# ----------------------------
-# View all rows and columns (no truncation)
-print(df_with_week, n = Inf, width = Inf)
-
-# Optional: View first few rows interactively
-# View(df_with_week)
-
-
-
-
-
-# -----------------------------
-# 0️⃣ Load required packages
-# -----------------------------
-install.packages("writexl") 
-library(tidyverse)
-library(readxl)
-library(writexl)   # for writing Excel files
-
-# -----------------------------
-# 1️⃣ Load your original dataset
-# -----------------------------
-df <- read_excel(
-  "GP2_Feedintake.xlsx",
-  na = c("NA", "N/A", "")    # Treat these as missing values
-)
-
-# -----------------------------
-# 2️⃣ Process the dataset
-# -----------------------------
-df_with_week <- df %>%
-  mutate(
-    # Convert day to numeric (if imported as text)
-    day = as.numeric(day),
-
-    # Compute week number (e.g., 1–7 = Week 1)
-    week = ceiling(day / 7),
-
-    # Standardize text columns
-    diet = factor(diet, levels = c("T1", "T2", "T3", "T4")),
-    sex = case_when(
-      sex %in% c("F", "Female", "FEMALES") ~ "F",
-      sex %in% c("M", "Male", "MALES")     ~ "M",
-      TRUE ~ as.character(sex)
-    ),
-    sex = factor(sex, levels = c("F", "M"))
-  ) %>%
-  arrange(week, day, diet, sex)
-
-# -----------------------------
-# 3️⃣ Print a preview in console
-# -----------------------------
-print(df_with_week, n = 50)
-
-# -----------------------------
-# 4️⃣ Export full dataset to Excel
-# -----------------------------
-# Define output file name and path
-output_path <- "GP2_Feedintake_with_week.xlsx"
-
-# Write to Excel file in the current working directory
-write_xlsx(df_with_week, output_path)
-
-# Confirm export
-cat("\n✅ File successfully saved as:", normalizePath(output_path), "\n")
-
-# Optional: check current working directory
-# getwd()
-
-
-
-# -----------------------------
-# 0️⃣ Load required packages
-# -----------------------------
+## =========================
+## 1) Packages
+## =========================
 library(tidyverse)
 library(readxl)
 library(writexl)
+library(car)
+library(ARTool)
+library(emmeans)
 
-# -----------------------------
-# 1️⃣ Load the cleaned feed intake dataset
-# -----------------------------
-# If you already have GP2_Feedintake_with_week.xlsx created earlier
-# use it directly:
-feed_df <- read_excel("GP2_Feedintake_with_week.xlsx")
+## =========================
+## 2) Import + prepare data
+## =========================
+feed_raw <- read_excel("GP2_Feedintake.xlsx", na = c("NA", "N/A", "")) %>%
+  janitor::clean_names()
 
-# -----------------------------
-# 2️⃣ Compute weekly ADFI summary (mean, SD, SEM)
-# -----------------------------
-adfi_summary <- feed_df %>%
-  group_by(diet, sex, week) %>%
-  summarise(
-    Mean_ADFI = mean(adfi, na.rm = TRUE),           # average daily feed intake
-    SD_ADFI   = sd(adfi, na.rm = TRUE),             # standard deviation
-    n         = n(),                                # sample size
-    SEM_ADFI  = SD_ADFI / sqrt(n),                  # standard error
-    .groups = "drop"
+# Standardise + create week
+feed_df <- feed_raw %>%
+  transmute(
+    Day  = suppressWarnings(as.numeric(day)),
+    Diet = factor(toupper(as.character(diet)), levels = c("T1","T2","T3","T4")),
+    Sex  = case_when(
+      toupper(as.character(sex)) %in% c("F","FEMALE","FEMALES") ~ "F",
+      toupper(as.character(sex)) %in% c("M","MALE","MALES")     ~ "M",
+      TRUE ~ NA_character_
+    ),
+    Sex  = factor(Sex, levels = c("F","M"), labels = c("Females","Males")),
+    ADFI = suppressWarnings(as.numeric(adfi))
   ) %>%
-  arrange(diet, sex, week)
+  mutate(
+    Week = ceiling(Day / 7)
+  ) %>%
+  drop_na(Day, Week, Diet, Sex, ADFI) %>%
+  arrange(Sex, Diet, Week, Day)
 
-# -----------------------------
-# 3️⃣ Print a preview in the console
-# -----------------------------
+# Optional export of processed daily file (for traceability)
+write_xlsx(feed_df, "GP2_Feedintake_with_week.xlsx")
+
+## =========================
+## 3) Weekly ADFI summary
+## =========================
+adfi_summary <- feed_df %>%
+  group_by(Diet, Sex, Week) %>%
+  summarise(
+    Mean_ADFI = mean(ADFI, na.rm = TRUE),
+    SD_ADFI   = sd(ADFI, na.rm = TRUE),
+    n         = n(),
+    SEM_ADFI  = SD_ADFI / sqrt(n),
+    .groups   = "drop"
+  ) %>%
+  arrange(Sex, Diet, Week)
+
+write_xlsx(adfi_summary, "GP2_ADFI_SUMMARY_DATA.xlsx")
+
 print(adfi_summary, n = 20)
 
-# -----------------------------
-# 4️⃣ Export to Excel for record keeping
-# -----------------------------
-write_xlsx(adfi_summary, "GP2_ADFI_summary.xlsx")
+## =========================
+## 4) Statistics (weeks as replicates)
+##    Diet × Sex on weekly Mean_ADFI
+## =========================
+mod_aov <- aov(Mean_ADFI ~ Diet * Sex, data = adfi_summary)
+resid_aov <- residuals(mod_aov)
 
-cat("\n✅ File successfully saved as: GP2_ADFI_summary.xlsx\n")
+shap_p <- shapiro.test(resid_aov)$p.value
+lev_p  <- car::leveneTest(Mean_ADFI ~ interaction(Diet, Sex), data = adfi_summary)[1, "Pr(>F)"]
 
+cat("\nBaseline diagnostics (weekly Mean_ADFI):\n")
+cat("  Shapiro p =", signif(shap_p, 4), "\n")  # ALL GOOD
+cat("  Levene  p =", signif(lev_p, 4), "\n") # ALL GOOD
 
-###plot
+assumptions_ok <- (shap_p > 0.05) && (lev_p > 0.05)
 
-# -----------------------------
-# 0️⃣ Load required packages
-# -----------------------------
-library(tidyverse)
-library(readxl)
+if (assumptions_ok) {
+  cat("\nInference route: 2-way ANOVA (Diet × Sex)\n")
+  tab <- anova(mod_aov)
+  print(tab)
 
-# -----------------------------
-# 1️⃣ Load your ADFI summary data
-# -----------------------------
-adfi_summary <- read_excel("GP2_ADFI_summary.xlsx")
+  # Diet contrasts within Sex (optional; only interpret if Diet main/interaction matters)
+  emm <- emmeans(mod_aov, ~ Diet | Sex)
+  print(emm)
+  print(pairs(emm, adjust = "tukey"))
 
-# Ensure data types are clean and consistent
-adfi_summary <- adfi_summary %>%
-  mutate(
-    Diet = factor(diet, levels = c("T1", "T2", "T3", "T4")),
-    Sex  = factor(sex, levels = c("F", "M")),
-    Week = as.numeric(week)
-  )
+} else {
+  cat("\nInference route: ART factorial ANOVA (robust)\n")
+  mod_art <- ARTool::art(Mean_ADFI ~ Diet * Sex, data = adfi_summary)
+  tab <- anova(mod_art)
+  print(tab)
 
-# -----------------------------
-# 2️⃣ Define colour palette for diets
-# -----------------------------
+  art_int <- ARTool::artlm(mod_art, "Diet:Sex")
+  emm <- emmeans(art_int, ~ Diet | Sex)
+  print(emm)
+  print(pairs(emm, adjust = "tukey"))
+}
+
+## =========================
+## 5) Plot settings
+## =========================
 diet_palette <- c(
-  "T1" = "#E69F00",  # orange
-  "T2" = "#009E73",  # green
-  "T3" = "#0072B2",  # blue
-  "T4" = "#CC79A7"   # magenta
+  "T1" = "#E69F00",
+  "T2" = "#009E73",
+  "T3" = "#0072B2",
+  "T4" = "#CC79A7"
 )
 
-# -----------------------------
-# 3️⃣ Plot mean ADFI (± SEM)
-# -----------------------------
-p_adfi <- ggplot(adfi_summary,
-                 aes(x = Week,
-                     y = Mean_ADFI,
-                     colour = Diet,
-                     group = Diet)) +
+## =========================
+## 6) Plot A: Weekly ADFI by Diet, faceted by Sex (Mean ± SEM)
+## =========================
+ymax_sex <- max(adfi_summary$Mean_ADFI + adfi_summary$SEM_ADFI, na.rm = TRUE)
+y_pad    <- 0.08 * ymax_sex
 
-  # Mean lines
-  geom_line(size = 1.05) +
-
-  # Error bars (± SEM)
-  geom_errorbar(
-    aes(ymin = Mean_ADFI - SEM_ADFI,
-        ymax = Mean_ADFI + SEM_ADFI),
-    width = 0.25,
-    linewidth = 0.6
-  ) +
-
-  # Points for weekly means
-  geom_point(size = 2.8) +
-
-  # Separate panels by sex
-  facet_wrap(
-    ~ Sex,
-    nrow = 1,
-    labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))
-  ) +
-
-  # Colour and axis scaling
+p_adfi_sex <- ggplot(adfi_summary,
+                     aes(x = Week, y = Mean_ADFI, colour = Diet, group = Diet)) +
+  geom_line(linewidth = 1.05) +
+  geom_point(size = 2.6) +
+  geom_errorbar(aes(ymin = pmax(0, Mean_ADFI - SEM_ADFI),
+                    ymax = Mean_ADFI + SEM_ADFI),
+                width = 0.20, linewidth = 0.6) +
+  facet_wrap(~ Sex, nrow = 1) +
   scale_colour_manual(values = diet_palette) +
-  scale_x_continuous(
-    breaks = 1:10,
-    minor_breaks = NULL,
-    expand = expansion(add = c(0.2, 0.2))
-  ) +
-  scale_y_continuous(
-    limits = c(0, NA),
-    expand = expansion(mult = c(0, 0.08))
-  ) +
-
-  # -----------------------------
-  # 4️⃣ Publication-quality theme
-  # -----------------------------
-  theme_bw(base_size = 14) +
+  scale_x_continuous(breaks = sort(unique(adfi_summary$Week)),
+                     minor_breaks = NULL,
+                     expand = expansion(add = c(0.25, 0.25))) +
+  coord_cartesian(ylim = c(15, ymax_sex + y_pad), clip = "off") +
+  theme_classic(base_size = 14) +
   theme(
-    legend.position    = "right",
-    legend.title       = element_text(face = "bold"),
-    legend.text        = element_text(size = 11),
-    panel.grid.minor   = element_blank(),
-    panel.grid.major.x = element_blank(),
-    strip.text         = element_text(face = "bold", size = 13),
-    axis.title.x       = element_text(face = "bold"),
-    axis.title.y       = element_text(face = "bold"),
-    axis.text          = element_text(colour = "black", size = 11),
-    plot.title         = element_text(face = "bold", size = 15, hjust = 0.5)
+    legend.position = "right",
+    legend.title = element_text(face = "bold"),
+    panel.grid = element_blank(),
+    strip.background = element_rect(fill = "white", colour = "black", linewidth = 0.6),
+    strip.text = element_text(face = "bold", size = 13),
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(colour = "black")
   ) +
-
-  # -----------------------------
-  # 5️⃣ Labels and title
-  # -----------------------------
   labs(
-    title    = "Weekly Average Daily Feed Intake (ADFI) of Guinea Pigs by Diet and Sex",
-    subtitle = "Mean ± SEM (g feed/animal/day)",
-    x        = "Week of Experiment",
-    y        = "Average Daily Feed Intake (g/day)",
-    colour   = "Diet"
+    x = "Week of experiment",
+    y = "Average daily feed intake (g/animal/day)",
+    colour = "Diet"
   )
 
-# -----------------------------
-# 6️⃣ Print the plot
-# -----------------------------
-print(p_adfi)
+print(p_adfi_sex)
+
+ggsave("Figure_ADFI_Weekly_by_Diet_Sex.png", p_adfi_sex, width = 10, height = 5, dpi = 600, bg = "white")
+ggsave("Figure_ADFI_Weekly_by_Diet_Sex.pdf", p_adfi_sex, width = 10, height = 5, device = cairo_pdf)
 
 
-ggsave("ADFI_Weekly_by_Diet_Sex.png", p_adfi,
-       width = 10, height = 5, dpi = 600)
-
-
-
-
-############# OVERALL ADFI (NO SEX)
-
-# Overall (no sex) figure: ADFI vs Week across diets (journal-ready + saved high-res)
+## =========================================================
+## Overall ADFI vs Diet (weeks as replicates), faceted by sex
+## + add ANOVA stats (Diet effect within each sex)
+## =========================================================
 
 library(tidyverse)
-library(readxl)
+library(emmeans)
+library(ggplot2)
+
+# adfi_summary must exist with columns:
+# Diet, Sex (Females/Males), Week, Mean_ADFI, SD_ADFI, n, SEM_ADFI
 
 # -----------------------------
-# 1) Load data
+# 1) Build "overall ADFI vs Diet" dataset (weeks = replicates)
+#    This keeps each week as a replicate, but collapses over Week in the plot.
 # -----------------------------
-adfi_sum <- read_excel("GP2_ADFI_summary.xlsx") %>%
+adfi_by_diet_sex <- adfi_summary %>%
+  filter(!is.na(Mean_ADFI), !is.na(Sex), !is.na(Diet)) %>%
   mutate(
-    Diet = factor(diet, levels = c("T1","T2","T3","T4")),
-    Week = as.numeric(week),
-    Mean_ADFI = as.numeric(Mean_ADFI),
-    SEM_ADFI  = as.numeric(SEM_ADFI),
-    n         = as.numeric(n)
-  )
-
-# -----------------------------
-# 2) Collapse across sex (sex not shown)
-#    - Mean across sex: weighted by n
-#    - SEM across sex: from pooled variance (uses SD within each sex)
-# -----------------------------
-adfi_overall <- adfi_sum %>%
-  mutate(
-    SD_ADFI = as.numeric(SD_ADFI),
-    n       = as.integer(n)
+    Diet = factor(Diet),
+    Sex  = factor(Sex, levels = c("Females","Males"))
   ) %>%
-  filter(!is.na(Diet), !is.na(Week), !is.na(Mean_ADFI), !is.na(n), n > 0) %>%
-  group_by(Diet, Week) %>%
+  group_by(Sex, Diet) %>%
   summarise(
-    n_total   = sum(n, na.rm = TRUE),
-    Mean_ADFI = weighted.mean(Mean_ADFI, w = n, na.rm = TRUE),
-
-    # pooled SD across sexes (if both sexes exist)
-    SD_pooled = {
-      # pooled variance: sum((n_i-1)*sd_i^2)/sum(n_i-1)
-      denom <- sum(pmax(n - 1L, 0L), na.rm = TRUE)
-      ifelse(denom > 0,
-             sqrt(sum(pmax(n - 1L, 0L) * (SD_ADFI^2), na.rm = TRUE) / denom),
-             NA_real_)
-    },
-
-    SEM_ADFI = ifelse(n_total > 0, SD_pooled / sqrt(n_total), NA_real_),
-
-    # keep ribbon/errorbars from ever going below 0 (nice visual buffer)
-    ymin = pmax(0, Mean_ADFI - SEM_ADFI),
-    ymax = Mean_ADFI + SEM_ADFI,
-    .groups = "drop"
+    mean_adfi = mean(Mean_ADFI, na.rm = TRUE),
+    sd_adfi   = sd(Mean_ADFI, na.rm = TRUE),
+    n_week    = sum(!is.na(Mean_ADFI)),
+    sem_adfi  = sd_adfi / sqrt(n_week),
+    .groups   = "drop"
+  ) %>%
+  mutate(
+    ymin = pmax(0, mean_adfi - sem_adfi),
+    ymax = mean_adfi + sem_adfi
   )
 
 # -----------------------------
-# 3) Palette + plot
+# 2) Diet effect ANOVA *within each sex*
+#    (This matches your finding that Diet×Sex is significant.)
+# -----------------------------
+aov_f <- aov(Mean_ADFI ~ Diet, data = filter(adfi_summary, Sex == "Females"))
+aov_m <- aov(Mean_ADFI ~ Diet, data = filter(adfi_summary, Sex == "Males"))
+
+tab_f <- anova(aov_f)
+tab_m <- anova(aov_m)
+
+get_Fp <- function(tab){
+  # robust extraction for base anova tables
+  Fv <- tab$`F value`[1]
+  pv <- tab$`Pr(>F)`[1]
+  list(F = as.numeric(Fv), p = as.numeric(pv))
+}
+
+fp_f <- get_Fp(tab_f)
+fp_m <- get_Fp(tab_m)
+
+fmt_p <- function(p){
+  if (is.na(p)) return("NA")
+  if (p < 0.001) return("<0.001")
+  formatC(p, digits = 3, format = "f")
+}
+
+stats_df <- tibble(
+  Sex = factor(c("Females","Males"), levels = c("Females","Males")),
+  label = c(
+    paste0("Diet ANOVA: F = ", formatC(fp_f$F, digits = 2, format = "f"),
+           ", p = ", fmt_p(fp_f$p)),
+    paste0("Diet ANOVA: F = ", formatC(fp_m$F, digits = 2, format = "f"),
+           ", p = ", fmt_p(fp_m$p))
+  )
+)
+
+# placement for the annotation in each facet
+y_top <- max(adfi_by_diet_sex$ymax, na.rm = TRUE)
+y_pad <- 0.10 * y_top
+
+stats_df <- stats_df %>%
+  mutate(
+    x = 1,                      # left side of x axis (Diet level 1)
+    y = y_top + 0.7 * y_pad
+  )
+
+# -----------------------------
+# 3) Journal-ready plot
 # -----------------------------
 diet_palette <- c(
   "T1" = "#E69F00",
@@ -2524,142 +2709,186 @@ diet_palette <- c(
   "T4" = "#CC79A7"
 )
 
-# y-axis buffer so nothing sits on the baseline
-ymax_all <- max(adfi_overall$ymax, na.rm = TRUE)
-y_pad    <- 0.06 * ymax_all
+p_adfi_diet_sex <- ggplot(adfi_by_diet_sex,
+                          aes(x = Diet, y = mean_adfi, fill = Diet)) +
 
-p_adfi_overall <- ggplot(adfi_overall,
-                         aes(x = Week, y = Mean_ADFI, colour = Diet, fill = Diet, group = Diet)) +
-  # SEM ribbon (optional; comment this out if you want ONLY error bars)
-  geom_ribbon(aes(ymin = pmax(0, ymin), ymax = ymax), alpha = 0.18, colour = NA) +
-
-  # mean line + points
-  geom_line(linewidth = 1.05) +
-  geom_point(size = 2.6, shape = 21, fill = "white", colour = "black", stroke = 0.7) +
+  # mean bars (overall across weeks) — clean look
+  geom_col(width = 0.68, alpha = 0.92, colour = "black", linewidth = 0.55) +
 
   # SEM error bars
-  geom_errorbar(aes(ymin = pmax(0, ymin), ymax = ymax),
-                width = 0.18, linewidth = 0.65) +
+  geom_errorbar(aes(ymin = ymin, ymax = ymax),
+                width = 0.16, linewidth = 0.7) +
 
-  scale_colour_manual(values = diet_palette) +
+  # mean points (over bar) to emphasise estimates
+  geom_point(shape = 21, size = 3.0, fill = "white",
+             colour = "black", stroke = 0.9) +
+
+  # per-facet Diet ANOVA stats
+  geom_text(
+    data = stats_df,
+    aes(x = x, y = y, label = label),
+    inherit.aes = FALSE,
+    hjust = 0,
+    size = 3.7
+  ) +
+
+  facet_wrap(~ Sex, nrow = 1) +
+
   scale_fill_manual(values = diet_palette) +
 
-  scale_x_continuous(
-    breaks = 1:10,
-    minor_breaks = NULL,
-    expand = expansion(add = c(0.25, 0.25))
-  ) +
-  scale_y_continuous(
-    limits = c(0, NA),                      # << buffer below baseline
-    breaks = scales::pretty_breaks(n = 6),
-    expand = expansion(mult = c(0, 0.06))
-  ) +
+  # start at 0 + ensure bars don't touch x-axis
+  coord_cartesian(ylim = c(0, y_top + y_pad), clip = "off") +
+  scale_y_continuous(expand = expansion(mult = c(0.03, 0.06))) +
 
-  theme_bw(base_size = 14) +
+  theme_classic(base_size = 14) +
   theme(
-    legend.position    = "right",
-    legend.title       = element_text(face = "bold"),
-    panel.grid.minor   = element_blank(),
-    panel.grid.major.x = element_blank(),
-    axis.title.x       = element_text(face = "bold"),
-    axis.title.y       = element_text(face = "bold"),
-    axis.text          = element_text(colour = "black"),
-    plot.title         = element_text(face = "bold", hjust = 0.5, size = 15),
-    plot.subtitle      = element_text(hjust = 0.5)
+    legend.position = "none",
+    panel.grid = element_blank(),
+    strip.background = element_rect(fill = "white", colour = "black", linewidth = 0.6),
+    strip.text = element_text(face = "bold", size = 13),
+    axis.title.x = element_text(face = "bold"),
+    axis.title.y = element_text(face = "bold"),
+    axis.text = element_text(colour = "black"),
+    plot.margin = margin(8, 14, 10, 10)
   ) +
   labs(
-    title    = "Weekly Average Daily Feed Intake (ADFI) of Guinea Pigs by Diet",
-    subtitle = "Overall mean across sexes (± SEM)",
-    x        = "Week of experiment",
-    y        = "Average daily feed intake (g/animal/day)",
-    colour   = "Diet",
-    fill     = "Diet"
+    x = "Diet",
+    y = "Average daily feed intake (g/animal/day)"
   )
 
-print(p_adfi_overall)
+print(p_adfi_diet_sex)
 
 # -----------------------------
 # 4) Save high-resolution
 # -----------------------------
-ggsave("Figure_ADFI_Weekly_Overall_by_Diet.png",
-       plot = p_adfi_overall,
-       width = 10, height = 6.5, dpi = 600)
+ggsave("Figure_ADFI_Overall_by_Diet_Faceted_by_Sex.png",
+       plot = p_adfi_diet_sex,
+       width = 9.2, height = 4.6, dpi = 600, bg = "white")
+
+ggsave("Figure_ADFI_Overall_by_Diet_Faceted_by_Sex.pdf",
+       plot = p_adfi_diet_sex,
+       width = 9.2, height = 4.6, device = cairo_pdf)
 
 
 
 
-##### combine ADG and ADFI
-
-# ---------------------------------------------------------
-# 0️⃣ Load required libraries
-# ---------------------------------------------------------
-library(tidyverse)
-library(patchwork)   # for combining ggplots
-
-# ---------------------------------------------------------
-# 1️⃣ Ensure both plots exist:
-#     p_adg  → Weekly ADG by Diet × Sex
-#     p_adfi → Weekly ADFI by Diet × Sex
-# ---------------------------------------------------------
-# (Assumes you have already created them from the earlier scripts)
-
-# ---------------------------------------------------------
-# 2️⃣ Combine the two figures vertically
-# ---------------------------------------------------------
-p_combined <- p_adg / p_adfi +
-  plot_annotation(
-    tag_levels = 'A',                # labels the panels “A”, “B”
-    tag_prefix = "", tag_suffix = "",# clean labels
-    title = "Weekly Performance of Guinea Pigs under Different Diets",
-    subtitle = "Panel A: Average Daily Gain (ADG)\nPanel B: Average Daily Feed Intake (ADFI)",
-    theme = theme(
-      plot.title    = element_text(face = "bold", size = 16, hjust = 0.5),
-      plot.subtitle = element_text(size = 12, colour = "grey30", hjust = 0.5)
-    )
-  )
-
-# ---------------------------------------------------------
-# 3️⃣ Print combined plot
-# ---------------------------------------------------------
-print(p_combined)
-
-# ---------------------------------------------------------
-# 4️⃣ (Optional) Save high-resolution figure
-# ---------------------------------------------------------
-ggsave("ADG_ADFI_Combined_Panel.png",
-       p_combined,
-       width = 10, height = 9, dpi = 600)
-
-##################################
 ```
 
-# FCR
+# 10. FCR
 
 ```{r}
+############################################################
+## GP2 — FCR ANALYSIS + JOURNAL-READY FIGURE (NO ERRORS)
+## Weeks treated as replicates (as per your ADFI/ADG approach)
+############################################################
 
 library(tidyverse)
 library(readxl)
-library(writexl)
+library(car)
+library(emmeans)
+library(ARTool)
 
+## =========================
+## 1) Load + clean FCR data
+## =========================
+setwd("C:/Guinea-Pig-data_2/Data")
 
-# Load data (edit file name/path if needed)
-fcr_data <- read_excel("GP2_FCR_wkly.xlsx", na = c("NA", "N/A", ""))
-
-# Clean and format
-fcr_data <- fcr_data %>%
-  mutate(
-    Diet     = factor(diet, levels = c("T1", "T2", "T3", "T4")),
-    Sex      = factor(sex,  levels = c("F", "M")),
-    Week     = as.numeric(week),
-    FCR      = as.numeric(FCR),
-    Mean_ADFI = as.numeric(Mean_ADFI),
-    Mean_ADG  = as.numeric(Mean_ADG)
+fcr_data <- read_excel("GP2_FCR_wk.xlsx", na = c("NA", "N/A", "")) %>%
+  janitor::clean_names() %>%   # safe standardisation
+  transmute(
+    Diet      = factor(toupper(as.character(diet)), levels = c("T1","T2","T3","T4")),
+    Sex       = case_when(
+      toupper(as.character(sex)) %in% c("F","FEMALE","FEMALES") ~ "F",
+      toupper(as.character(sex)) %in% c("M","MALE","MALES")     ~ "M",
+      TRUE ~ NA_character_
+    ),
+    Sex       = factor(Sex, levels = c("F","M"), labels = c("Females","Males")),
+    Week      = suppressWarnings(as.numeric(week)),
+    FCR       = suppressWarnings(as.numeric(fcr)),
+    Mean_ADFI = suppressWarnings(as.numeric(mean_adfi)),
+    Mean_ADG  = suppressWarnings(as.numeric(mean_adg))
   ) %>%
-  drop_na(FCR)
+  drop_na(Diet, Sex, Week, FCR)
 
+glimpse(fcr_data)
 
+## =========================
+## 2) Stats: Diet × Sex on weekly FCR (weeks = replicates)
+## =========================
+mod_aov <- aov(FCR ~ Diet * Sex, data = fcr_data)
+resid_aov <- residuals(mod_aov)
 
-# Create summary statistics for FCR by Diet and Sex, using weeks as replicates
+shap_p <- shapiro.test(resid_aov)$p.value
+lev_p  <- car::leveneTest(FCR ~ interaction(Diet, Sex), data = fcr_data)[1, "Pr(>F)"]
+
+cat("\nFCR diagnostics:\n")
+cat("  Shapiro p =", signif(shap_p, 4), "\n")
+cat("  Levene  p =", signif(lev_p, 4), "\n")
+
+assumptions_ok <- (shap_p > 0.05) && (lev_p > 0.05)
+
+fmt_p <- function(p){
+  if (is.na(p)) return("NA")
+  if (p < 0.001) "<0.001" else formatC(p, digits = 3, format = "f")
+}
+
+if (assumptions_ok) {
+  cat("\nInference route: 2-way ANOVA (Diet × Sex)\n")
+  aov_tab <- anova(mod_aov)
+  print(aov_tab)
+
+  F_diet <- aov_tab["Diet", "F value"]; p_diet <- aov_tab["Diet", "Pr(>F)"]
+  F_sex  <- aov_tab["Sex",  "F value"]; p_sex  <- aov_tab["Sex",  "Pr(>F)"]
+  F_int  <- aov_tab["Diet:Sex","F value"]; p_int <- aov_tab["Diet:Sex","Pr(>F)"]
+
+  stats_text <- paste0(
+    "ANOVA (weeks as replicates)\n",
+    "Diet: F=", formatC(F_diet, digits = 2, format = "f"), ", p=", fmt_p(p_diet), "\n",
+    "Sex: F=",  formatC(F_sex,  digits = 2, format = "f"), ", p=", fmt_p(p_sex),  "\n",
+    "Diet×Sex: F=", formatC(F_int, digits = 2, format = "f"), ", p=", fmt_p(p_int)
+  )
+
+  fit_used <- "ANOVA"
+
+} else {
+  cat("\nInference route: ART factorial ANOVA (robust)\n")
+  mod_art <- ARTool::art(FCR ~ Diet * Sex, data = fcr_data)
+  art_tab <- as.data.frame(anova(mod_art)) %>% tibble::rownames_to_column("Effect")
+  print(art_tab)
+
+  # pull F + p safely (ARTool anova has columns: Df, Df.res, F value, Pr(>F))
+  F_diet <- art_tab %>% filter(Effect == "Diet")     %>% pull(`F value`)
+  p_diet <- art_tab %>% filter(Effect == "Diet")     %>% pull(`Pr(>F)`)
+  F_sex  <- art_tab %>% filter(Effect == "Sex")      %>% pull(`F value`)
+  p_sex  <- art_tab %>% filter(Effect == "Sex")      %>% pull(`Pr(>F)`)
+  F_int  <- art_tab %>% filter(Effect == "Diet:Sex") %>% pull(`F value`)
+  p_int  <- art_tab %>% filter(Effect == "Diet:Sex") %>% pull(`Pr(>F)`)
+
+  stats_text <- paste0(
+    "ART ANOVA (weeks as replicates)\n",
+    "Diet: F=", formatC(F_diet, digits = 2, format = "f"), ", p=", fmt_p(p_diet), "\n",
+    "Sex: F=",  formatC(F_sex,  digits = 2, format = "f"), ", p=", fmt_p(p_sex),  "\n",
+    "Diet×Sex: F=", formatC(F_int, digits = 2, format = "f"), ", p=", fmt_p(p_int)
+  )
+
+  fit_used <- "ART"
+}
+
+## Optional: post-hoc Diet within Sex (only if Diet×Sex OR Diet is meaningful)
+if (assumptions_ok) {
+  emm <- emmeans(mod_aov, ~ Diet | Sex)
+  print(emm)
+  print(pairs(emm, adjust = "tukey"))
+} else {
+  art_int <- ARTool::artlm(mod_art, "Diet:Sex")
+  emm <- emmeans(art_int, ~ Diet | Sex)
+  print(emm)
+  print(pairs(emm, adjust = "tukey"))
+}
+
+## =========================
+## 3) Summary for plotting (means ± SEM across weeks)
+## =========================
 fcr_overall <- fcr_data %>%
   group_by(Diet, Sex) %>%
   summarise(
@@ -2670,11 +2899,13 @@ fcr_overall <- fcr_data %>%
     .groups  = "drop"
   ) %>%
   mutate(
-    # Correct recode syntax: use quotes around keys
-    Sex_Label = dplyr::recode(Sex, "F" = "Females", "M" = "Males")
+    ymin = pmax(0, Mean_FCR - SEM_FCR),
+    ymax = Mean_FCR + SEM_FCR
   )
 
-
+## =========================
+## 4) Journal-ready plot (faceted by sex + stats text)
+## =========================
 fcr_palette <- c(
   "T1" = "#E69F00",
   "T2" = "#009E73",
@@ -2682,975 +2913,127 @@ fcr_palette <- c(
   "T4" = "#CC79A7"
 )
 
-p_fcr_overall <- ggplot(fcr_overall,
-                        aes(x = Diet, y = Mean_FCR, fill = Diet)) +
+y_top <- max(fcr_overall$ymax, na.rm = TRUE)
+y_pad <- 0.14 * y_top
 
-  # Bar (mean FCR)
-  geom_col(width = 0.65, alpha = 0.95, colour = "black") +
+p_fcr <- ggplot(fcr_overall, aes(x = Diet, y = Mean_FCR, fill = Diet)) +
 
-  # Error bar (± SEM)
-  geom_errorbar(aes(ymin = Mean_FCR - SEM_FCR, ymax = Mean_FCR + SEM_FCR),
-                width = 0.18, linewidth = 0.7) +
+  # bars
+  geom_col(width = 0.66, alpha = 0.92, colour = "black", linewidth = 0.6) +
 
-  # Mean labels
-  geom_text(aes(label = sprintf("%.2f", Mean_FCR)),
-            vjust = -0.7, fontface = "bold", size = 4.2) +
+  # SEM errorbars
+  geom_errorbar(aes(ymin = ymin, ymax = ymax), width = 0.16, linewidth = 0.75) +
 
-  # Facet by Sex
-  facet_wrap(~ Sex_Label, nrow = 1) +
+  # mean points (nice for print)
+  geom_point(shape = 21, size = 3.0, fill = "white", colour = "black", stroke = 0.9) +
 
+  facet_wrap(~ Sex, nrow = 1) +
   scale_fill_manual(values = fcr_palette) +
-  scale_y_continuous(
-    limits = c(0, NA),
-    expand = expansion(mult = c(0.05, 0.12))
+
+  # start at 0 + add headroom so bars don't touch x-axis
+  coord_cartesian(ylim = c(0, y_top + y_pad), clip = "off") +
+  scale_y_continuous(expand = expansion(mult = c(0.03, 0.06))) +
+
+  # stats annotation (top-left of figure area)
+  annotate(
+    "text",
+    x = -Inf, y = Inf,
+    label = stats_text,
+    hjust = -0.02, vjust = 1.05,
+    size = 3.6
   ) +
 
-  theme_bw(base_size = 14) +
+  theme_classic(base_size = 14) +
   theme(
     legend.position = "none",
-    strip.text = element_text(face = "bold", size = 13),
-    axis.title.x = element_text(face = "bold"),
-    axis.title.y = element_text(face = "bold"),
-    axis.text    = element_text(colour = "black", size = 11),
-    plot.title   = element_text(face = "bold", hjust = 0.5)
+    panel.grid      = element_blank(),
+    strip.background = element_rect(fill = "white", colour = "black", linewidth = 0.6),
+    strip.text      = element_text(face = "bold", size = 13),
+    axis.title.x    = element_text(face = "bold"),
+    axis.title.y    = element_text(face = "bold"),
+    axis.text       = element_text(colour = "black"),
+    plot.margin     = margin(8, 14, 10, 10)
   ) +
-
   labs(
-    title = "Overall Feed Conversion Ratio (FCR) by Diet and Sex",
-    subtitle = "Mean FCR ± SEM using week as replicate unit (n = 10 weeks)",
     x = "Diet",
-    y = "Feed Conversion Ratio (FCR)"
+    y = "Feed conversion ratio (FCR)"
   )
 
-# View
-print(p_fcr_overall)
+print(p_fcr)
 
+## =========================
+## 5) Save high-resolution
+## =========================
+ggsave("Figure_FCR_Overall_by_Diet_Faceted_by_Sex.png",
+       plot = p_fcr, width = 9.2, height = 4.6, dpi = 600, bg = "white")
 
+ggsave("Figure_FCR_Overall_by_Diet_Faceted_by_Sex.pdf",
+       plot = p_fcr, width = 9.2, height = 4.6, device = cairo_pdf)
 
-# Main FCR violin plot with mean ± SEM from summary
-p_fcr_overall_violin <- ggplot(fcr_data, aes(x = Diet, y = FCR, fill = Diet)) +
-  
-  # Violin plot from raw data
-  geom_violin(
-    width = 0.85,
-    alpha = 0.9,
-    colour = "black",
-    linewidth = 0.6,
-    trim = FALSE
-  ) +
-  
-  # Overlay mean point from fcr_overall
-  geom_point(
-    data = fcr_overall,
-    aes(x = Diet, y = Mean_FCR),
-    shape = 21,
-    size = 3.5,
-    fill = "white",
-    colour = "black",
-    stroke = 0.8,
-    inherit.aes = FALSE
-  ) +
-
-  # Error bars (± SEM) from fcr_overall
-  geom_errorbar(
-    data = fcr_overall,
-    aes(x = Diet, ymin = Mean_FCR - SEM_FCR, ymax = Mean_FCR + SEM_FCR),
-    width = 0.15,
-    linewidth = 0.7,
-    inherit.aes = FALSE
-  ) +
-
-  # Mean text labels from fcr_overall
-  geom_text(
-    data = fcr_overall,
-    aes(x = Diet, y = Mean_FCR, label = sprintf("%.2f", Mean_FCR)),
-    vjust = -1.1,
-    fontface = "bold",
-    size = 4.2,
-    inherit.aes = FALSE
-  ) +
-
-  # Facet by sex
-  facet_wrap(~ Sex_Label, nrow = 1) +
-
-  # Colour palette
-  scale_fill_manual(values = fcr_palette) +
-
-  # Y-axis scaling
-  scale_y_continuous(
-    limits = c(0, NA),
-    expand = expansion(mult = c(0.05, 0.12))
-  ) +
-
-  # Journal-style theme
-  theme_bw(base_size = 14) +
-  theme(
-    legend.position = "none",
-    strip.text = element_text(face = "bold", size = 13),
-    axis.title.x = element_text(face = "bold"),
-    axis.title.y = element_text(face = "bold"),
-    axis.text    = element_text(colour = "black", size = 11),
-    plot.title   = element_text(face = "bold", hjust = 0.5)
-  ) +
-
-  # Labels
-  labs(
-    title    = "Overall Feed Conversion Ratio (FCR) by Diet and Sex",
-    subtitle = "Violin plot of FCR values across weeks (n = 10), with mean ± SEM overlay",
-    x        = "Diet",
-    y        = "Feed Conversion Ratio (FCR)"
-  )
-
-# Show the plot
-print(p_fcr_overall_violin)
-
-
-```
-## 8.2Models
-```{r}
-#Your raw data is long (ID repeated across weeks), so ADG must be computed by summarising per ID.
-
-animal_growth <- df %>%
-  group_by(ID, Diet, Sex) %>%   # Include Compartment if you want
-  summarise(
-    InitialWeight = first(InitialWeight),
-    FinalWeight   = last(Weight),
-    Duration_days = (max(Week) - min(Week)) * 7,
-    .groups = "drop"
-  ) %>%
-  mutate(
-    ADG = (FinalWeight - InitialWeight) / Duration_days,
-    RGR = (log(FinalWeight) - log(InitialWeight)) / Duration_days
-  )
-
-names(animal_growth)# check if ADG exist
-
-adg_mod <- lm(ADG ~ Diet * Sex + InitialWeight, data = animal_growth)
-summary(adg_mod)
-anova(adg_mod)
+cat("\nSaved:\n- Figure_FCR_Overall_by_Diet_Faceted_by_Sex.png\n- Figure_FCR_Overall_by_Diet_Faceted_by_Sex.pdf\n")
+cat("Inference route used:", fit_used, "\n")
 
 
 ```
 
-##8.2 Effect sizes (eta-squared) for Diet
-
-```{r}
-eta_squared(aov(ADG ~ Diet, data = animal_growth))
-eta_squared(aov(RGR ~ Diet, data = animal_growth)) # >0.30 = large effect of diet
-
-```
-
-##8.3 Diagnostics for ADG model
-
-```{r}
-par(mfrow = c(2, 2))
-plot(adg_mod)
-par(mfrow = c(1, 1))
-
-```
-
-##8.4 Visualisation of ADG and RGR by Diet
+# 11. Combine ADFI, ADG and FCR
 
 ```{r}
 
-library(tidyverse)
+# =========================================================
+# MULTI-PANEL FIGURE: Feed intake, growth and efficiency
+# =========================================================
+
 library(patchwork)
 
-# Colourblind-friendly Sex palette
-sex_palette <- c(
-  "FEMALES" = "#0072B2",
-  "MALES"   = "#D55E00"
-)
-
-# 0. Convert RGR to percentage for plotting ----------------------
-animal_growth <- animal_growth %>%
-  mutate(RGR_perc = RGR * 100)   # RGR expressed as % per day
-
-# ---------------------- ADG Plot ---------------------------
-p_adg <- ggplot(animal_growth,
-                aes(x = Diet, y = ADG, fill = Sex)) +
-  geom_boxplot(
-    alpha    = 0.85,
-    width    = 0.65,
-    position = position_dodge(width = 0.8),
-    outlier.shape = NA
-  ) +
-  # Mean points on each box (per Diet × Sex)
-  stat_summary(
-    fun     = mean,
-    geom    = "point",
-    position = position_dodge(width = 0.8),
-    shape   = 21,
-    size    = 2.8,
-    fill    = "white",
-    colour  = "black",
-    stroke  = 0.7
-  ) +
-  scale_fill_manual(values = sex_palette) +
-  scale_y_continuous(
-    limits = c(0, NA),
-    expand = expansion(mult = c(0, 0.05))
-  ) +
-  theme_bw(base_size = 13) +
+# ---- Ensure panel tags are added cleanly
+p_adfi_sex_tagged <- p_adfi_diet_sex +
+  labs(tag = "A") +
   theme(
-    legend.position    = "top",
-    legend.title       = element_blank(),
-    panel.grid.minor   = element_blank(),
-    panel.grid.major.x = element_blank(),
-    axis.title.x       = element_text(face = "bold"),
-    axis.title.y       = element_text(face = "bold"),
-    axis.text          = element_text(colour = "black"),
-    plot.title         = element_text(face = "bold", hjust = 0.5)
-  ) +
-  labs(
-    title = "Average Daily Gain (ADG)",
-    x     = "Diet",
-    y     = "ADG (g/day)"
+    plot.tag = element_text(face = "bold", size = 16)
   )
 
-# ---------------------- RGR Plot (as %) ---------------------------
-p_rgr <- ggplot(animal_growth,
-                aes(x = Diet, y = RGR_perc, fill = Sex)) +
-  geom_boxplot(
-    alpha    = 0.85,
-    width    = 0.65,
-    position = position_dodge(width = 0.8),
-    outlier.shape = NA
-  ) +
-  # Mean points on each box (per Diet × Sex)
-  stat_summary(
-    fun     = mean,
-    geom    = "point",
-    position = position_dodge(width = 0.8),
-    shape   = 21,
-    size    = 2.8,
-    fill    = "white",
-    colour  = "black",
-    stroke  = 0.7
-  ) +
-  scale_fill_manual(values = sex_palette) +
-  scale_y_continuous(
-    limits = c(0, NA),
-    expand = expansion(mult = c(0, 0.05))
-  ) +
-  theme_bw(base_size = 13) +
+p_adg_tagged <- p_overall_adg_box +
+  labs(tag = "B") +
   theme(
-    legend.position    = "none",   # legend already shown in ADG panel
-    panel.grid.minor   = element_blank(),
-    panel.grid.major.x = element_blank(),
-    axis.title.x       = element_text(face = "bold"),
-    axis.title.y       = element_text(face = "bold"),
-    axis.text          = element_text(colour = "black"),
-    plot.title         = element_text(face = "bold", hjust = 0.5)
-  ) +
-  labs(
-    title = "Relative Growth Rate (RGR)",
-    x     = "Diet",
-    y     = "RGR (% per day)"
+    plot.tag = element_text(face = "bold", size = 16)
   )
 
-# ------------------ Combine into one 2-panel figure --------------------
-(p_adg | p_rgr) +
-  plot_annotation(
-    title = "Growth performance of guinea pigs by diet and sex",
-    theme = theme(
-      plot.title = element_text(face = "bold", hjust = 0.5, size = 15)
-    )
-  )
-
-
-
-```
-
-#9. Uniformity: Coefficient of Variation (CV) by Week and Diet
-
-```{r}
-cv_summary <- df %>%
-group_by(Diet, Week) %>%
-summarise(
-mean_wt = mean(Weight, na.rm = TRUE),
-sd_wt   = sd(Weight, na.rm = TRUE),
-n       = n(),
-CV      = (sd_wt / mean_wt) * 100,
-.groups = "drop"
-)
-
-ggplot(cv_summary, aes(x = Week, y = CV, colour = Diet)) +
-geom_line(size = 1) +
-theme_bw(base_size = 12) +
-labs(
-title = "Uniformity of body weight (CV%) by diet over time",
-x = "Week",
-y = "Coefficient of variation (%)"
-)
-
-```
-
-#10. Early, Mid, Late Phase Growth (Phase-Specific ADG)
-
-```{r}
-#Define phases:
-#Early: Week ≤ 3
-#Mid: Week 4–7
-#Late: Week ≥ 8
-
-df_phase <- df %>%
-mutate(
-Phase = case_when(
-Week <= 3 ~ "Early",
-Week <= 7 ~ "Mid",
-TRUE      ~ "Late"
-),
-Phase = factor(Phase, levels = c("Early", "Mid", "Late"))
-)
-
-phase_gain <- df_phase %>%
-arrange(AnimalID, Week) %>%
-group_by(AnimalID, Diet, Sex, Phase) %>%
-summarise(
-StartW    = first(Weight),
-EndW      = last(Weight),
-Weeks     = max(Week) - min(Week),
-Gain      = EndW - StartW,
-ADG_phase = Gain / (Weeks * 7),
-.groups   = "drop"
-)
-
-summary(phase_gain)
-
-```
-
-##10.1 Phase model
-
-```{r}
-phase_mod <- lm(ADG_phase ~ Diet * Phase + Sex, data = phase_gain)
-
-anova(phase_mod)
-summary(phase_mod)
-
-```
-
-##10.2 Diagnostics for phase model
-
-```{r}
-par(mfrow = c(2, 2))
-plot(phase_mod)
-par(mfrow = c(1, 1))
-
-```
-
-##10.3 Visualisation
-
-```{r}
-ggplot(phase_gain,
-aes(x = Phase, y = ADG_phase, fill = Diet)) +
-geom_boxplot(alpha = 0.8, outlier.shape = NA,
-position = position_dodge(width = 0.8)) +
-theme_bw(base_size = 12) +
-labs(
-title = "Phase-specific growth (ADG) by diet",
-x = "Growth phase",
-y = "ADG within phase (g/day)"
-)
-
-```
-
-#11. Optional: Nonlinear Growth (Gompertz) Example for Diet T1
-
-```{r}
-df_T1 <- df %>%
-filter(Diet == "T1") %>%
-group_by(Week) %>%
-summarise(
-meanW = mean(Weight, na.rm = TRUE),
-.groups = "drop"
-)
-
-start_A  <- max(df_T1$meanW, na.rm = TRUE)
-start_k  <- 0.3
-start_t0 <- median(df_T1$Week, na.rm = TRUE)
-
-gom_T1 <- nls(
-meanW ~ A * exp(-exp(-k * (Week - t0))),
-data  = df_T1,
-start = list(A = start_A, k = start_k, t0 = start_t0)
-)
-
-summary(gom_T1)
-
-df_T1$pred <- predict(gom_T1)
-
-ggplot(df_T1, aes(x = Week)) +
-geom_point(aes(y = meanW)) +
-geom_line(aes(y = pred), colour = "red", size = 1) +
-theme_bw(base_size = 12) +
-labs(
-title = "Gompertz growth curve - Diet T1",
-x = "Week",
-y = "Mean body weight"
-)
-
-
-
-df_T1 <- df %>%
-  filter(Diet == "T1") %>%
-  group_by(Week) %>%
-  summarise(
-    meanW = mean(Weight, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-ggplot(df_T1, aes(x = Week, y = meanW)) +
-  geom_point() +
-  geom_line() +
-  theme_bw() +
-  labs(
-    title = "Mean body weight over time – Diet T1",
-    x = "Week",
-    y = "Mean body weight (g)"
-  )
-
-
-# Make sure df_T1 exists as above
-
-gom_T1 <- nls(
-  meanW ~ SSgompertz(Week, Asym, b2, b3),
-  data = df_T1
-)
-
-summary(gom_T1)
-
-df_T1$pred <- predict(gom_T1)
-
-ggplot(df_T1, aes(x = Week)) +
-  geom_point(aes(y = meanW)) +
-  geom_line(aes(y = pred), linewidth = 1) +
-  theme_bw() +
-  labs(
-    title = "Gompertz growth curve – Diet T1 (self-starting)",
-    x = "Week",
-    y = "Mean body weight (g)"
-  )
-
-
-```
-
-#12. FCR
-
-
-```{r}
-
-## ============================================================
-## 0. Packages
-## ============================================================
-library(readxl)
-library(tidyverse)
-library(rstatix)   # shapiro_test, levene_test, etc.
-library(emmeans)   # LS-means
-# library(multcomp) # uncomment if you want cld() for letters
-
-## ============================================================
-## 1. Import data
-## ============================================================
-weight_gain      <- read_excel("GP2_weight_gain.xlsx")
-daily_feedintake <- read_excel("GP2_Feedintake.xlsx")
-
-## ============================================================
-## 2. Clean & harmonise data
-## ============================================================
-
-### ---- 2.1 Weight gain / ADG data ----------------------------
-wg <- weight_gain %>%
-  rename(
-    Diet   = diet,
-    Sex    = sex,
-    Week   = week
-  ) %>%
-  mutate(
-    Diet        = factor(Diet),
-    Sex         = case_when(
-      Sex %in% c("F", "Female", "FEMALES") ~ "F",
-      Sex %in% c("M", "Male", "MALES")     ~ "M",
-      TRUE ~ as.character(Sex)
-    ),
-    Sex         = factor(Sex, levels = c("F", "M")),
-    ADG         = suppressWarnings(as.numeric(ADG)),          # g/day
-    weekly_gain = suppressWarnings(as.numeric(weekly_gain))   # g / week
-  ) %>%
-  drop_na(ADG, weekly_gain)
-
-### ---- 2.2 Feed intake / ADFI data ---------------------------
-fi <- daily_feedintake %>%
-  rename(
-    Diet  = diet,
-    Sex   = sex,
-    Day   = day
-  ) %>%
-  mutate(
-    Diet = factor(Diet),
-    Sex  = case_when(
-      Sex %in% c("F", "Female", "FEMALES") ~ "F",
-      Sex %in% c("M", "Male", "MALES")     ~ "M",
-      TRUE ~ as.character(Sex)
-    ),
-    Sex  = factor(Sex, levels = c("F", "M")),
-    ADFI = suppressWarnings(as.numeric(adfi)),   # g feed / animal / day
-    Week = ceiling(Day / 7)
-  ) %>%
-  drop_na(ADFI)
-
-## ============================================================
-## 3. ADG analysis (animal-week level)
-## ============================================================
-
-### 3.1 Model: ADG ~ Diet * Sex (all weeks, all animals)
-adg_mod <- lm(ADG ~ Diet * Sex, data = wg)
-
-# ANOVA
-anova(adg_mod)
-
-# Residual diagnostics
-adg_resid <- residuals(adg_mod)
-
-shapiro.test(adg_resid)        # global normality violeted
-levene_test(ADG ~ Diet * Sex, data = wg)  # homogeneity of variance violeted
-
-# If these look okay, you can interpret the ANOVA as standard.
-# If not, you could consider a rank-based alternative (e.g., ART),
-# but here we keep the linear model pipeline.
-
-
-# Install once if needed:
-install.packages("ARTool")
-
-# Load
-library(ARTool)
-# ART model for factorial Diet × Sex on weekly FCR
-adg_art <- art(ADG ~ Diet * Sex, data = wg)
-anova(adg_art)
-
-
-library(ARTool)
-library(emmeans)
-library(multcomp)   # for cld() if you want letters
-
-## 1. Fit ART model for ADG
-adg_art <- art(ADG ~ Diet * Sex, data = wg)   # use your ADG dataset
-
-## 2. ANOVA on aligned ranks (non-parametric factorial test)
-anova(adg_art)
-
-## 3. Get an lm-like object for the Diet × Sex interaction
-#    (this is the key step – emmeans works on this, not on adg_art directly)
-adg_art_lm_int <- artlm(adg_art, "Diet:Sex")
-
-## 4. Estimated marginal means for Diet × Sex
-emm_adg <- emmeans(adg_art_lm_int, ~ Diet | Sex)
-emm_adg   # print table
-
-## 5. Pairwise comparisons if you want them
-pairs(emm_adg, adjust = "tukey")
-
-## 6. Compact letter display (significance letters)
-cld_adg <- multcomp::cld(emm_adg, Letters = letters, adjust = "tukey")
-cld_adg
-
-## 7. If you want a data frame for plotting:
-emm_adg_df <- as.data.frame(cld_adg)
-head(emm_adg_df)
-
-
-# Optional: compact letter display (may require `library(multcomp)`)
-# adg_letters <- multcomp::cld(emm_adg, Letters = letters, adjust = "tukey")
-# adg_letters
-
-### 3.3 Journal-ready ADG plot (boxplots by Diet and Sex)
-
-# Colourblind-friendly palette for Sex
-library(tidyverse)
-
-# Colourblind-friendly palette
-sex_palette <- c(
-  "F" = "#0072B2",   # blue
-  "M" = "#D55E00"    # orange
-)
-
-p_adg <- ggplot(wg, aes(x = Diet, y = ADG, fill = Sex)) +
-
-  # ---- Boxplots ----
-  geom_boxplot(
-    alpha         = 0.90,
-    width         = 0.65,
-    outlier.shape = NA,
-    linewidth     = 0.9
-  ) +
-
-  # ---- Mean points ----
-  stat_summary(
-    fun   = mean,
-    geom  = "point",
-    shape = 21,
-    size  = 3,
-    fill  = "white",
-    colour = "black",
-    stroke = 0.8
-  ) +
-
-  # ---- Facet panels ----
-  facet_wrap(
-    ~ Sex,
-    labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))
-  ) +
-
-  # ---- Y-axis with padding to prevent whisker-x-axis overlap ----
-  scale_y_continuous(
-    expand = expansion(mult = c(0.02, 0.05))   # bottom ~7% padding
-  ) +
-  
-  scale_fill_manual(values = sex_palette) +
-
-  # ---- Theme ----
-  theme_bw(base_size = 14) +
+p_fcr_tagged <- p_fcr +
+  labs(tag = "C") +
   theme(
-    legend.position    = "none",
-    panel.grid.minor   = element_blank(),
-    panel.grid.major.x = element_blank(),
-    axis.title.x       = element_text(face = "bold"),
-    axis.title.y       = element_text(face = "bold"),
-    axis.text          = element_text(colour = "black"),
-    strip.text         = element_text(face = "bold", size = 14),
-    plot.title         = element_text(face = "bold", size = 16, hjust = 0.5)
-  ) +
-
-  labs(
-    title = "Average Daily Gain (ADG) of Guinea Pigs by Diet and Sex",
-    x     = "Diet",
-    y     = "ADG (g/day)"
+    plot.tag = element_text(face = "bold", size = 16)
   )
 
-p_adg
+# ---- Combine into a single row
+p_combined <- p_adfi_sex_tagged | p_adg_tagged | p_fcr_tagged
 
-##########################################################
-
-library(tidyverse)
-
-# ============================================================
-# 1. CLEAN WEIGHT GAIN DATA — remove negative weekly gains
-# ============================================================
-
-wg <- weight_gain %>%
-  mutate(
-    Diet = factor(diet),
-    Sex  = factor(sex, levels = c("F", "M")),
-    weekly_gain = suppressWarnings(as.numeric(weekly_gain)),
-    ADG = suppressWarnings(as.numeric(ADG))
-  ) %>%
-  drop_na(weekly_gain, ADG) %>%
-  filter(ADG > 0)     # <-- prevents negative values in ADG plots
-                      #     avoids whiskers below the x-axis
-
-
-# ============================================================
-# 2. COMPUTE TOTAL WEIGHT GAIN OVER 10 WEEKS PER DIET × SEX
-# ============================================================
-
-wg10 <- weight_gain %>%
-  mutate(
-    Diet = factor(diet),
-    Sex  = factor(sex, levels = c("F", "M")),
-    weekly_gain = suppressWarnings(as.numeric(weekly_gain))
-  ) %>%
-  drop_na(weekly_gain) %>%
-  group_by(Diet, Sex) %>%
-  summarise(
-    TotalGain_10wk = sum(weekly_gain, na.rm = TRUE),   # g/animal over 10 weeks
-    .groups = "drop"
-  )
-
-
-# ============================================================
-# 3. CLEAN FEED INTAKE DATA & COMPUTE TOTAL FEED (10 WEEKS)
-# ============================================================
-
-fi10 <- daily_feedintake %>%
-  rename(Diet = diet, Sex = sex) %>%
-  mutate(
-    Diet = factor(Diet),
-    Sex  = factor(Sex, levels = c("F", "M")),
-    ADFI = suppressWarnings(as.numeric(adfi))  # g feed/animal/day
-  ) %>%
-  drop_na(ADFI) %>%
-  group_by(Diet, Sex) %>%
-  summarise(
-    TotalFeed_10wk = sum(ADFI, na.rm = TRUE),  # total feed over 10 weeks
-    .groups = "drop"
-  )
-
-
-# ============================================================
-# 4. MERGE TOTAL FEED + TOTAL GAIN → COMPUTE FCR (10 weeks)
-# ============================================================
-
-fcr10 <- fi10 %>%
-  inner_join(wg10, by = c("Diet", "Sex")) %>%
-  mutate(
-    FCR_10wk = TotalFeed_10wk / TotalGain_10wk
-  )
-
-# View result
-fcr10
-
-
-# ============================================================
-# 5. PLOT ADG (NO NEGATIVE VALUES → CLEAN BOXPLOTS)
-# ============================================================
-
-sex_palette <- c("F" = "#0072B2", "M" = "#D55E00")
-
-p_adg <- ggplot(wg, aes(x = Diet, y = ADG, fill = Sex)) +
-  geom_boxplot(
-    alpha = 0.90,
-    width = 0.65,
-    outlier.shape = NA,
-    linewidth = 0.8
-  ) +
-  stat_summary(
-    fun = mean,
-    geom = "point",
-    shape = 21,
-    size = 3,
-    fill = "white",
-    colour = "black",
-    stroke = 0.8
-  ) +
-  facet_wrap(
-    ~ Sex,
-    labeller = labeller(Sex = c(F = "Females", M = "Males"))
-  ) +
-  scale_fill_manual(values = sex_palette) +
-  scale_y_continuous(
-    limits = c(0, NA),                # <-- prevents whiskers below x-axis
-    expand = expansion(mult = c(0.05, 0.05))
-  ) +
-  theme_bw(base_size = 14) +
+# ---- Final layout adjustments
+p_combined <- p_combined +
+  plot_layout(
+    widths = c(1.2, 1.0, 1.0),   # slightly emphasise ADFI
+    guides = "collect"
+  ) &
   theme(
-    legend.position = "none",
-    panel.grid.minor = element_blank(),
-    panel.grid.major.x = element_blank(),
-    axis.title.x = element_text(face = "bold"),
-    axis.title.y = element_text(face = "bold"),
-    strip.text = element_text(face = "bold"),
-    plot.title = element_text(face = "bold", hjust = 0.5)
-  ) +
-  labs(
-    title = "Average Daily Gain (ADG) of Guinea Pigs by Diet and Sex",
-    x = "Diet",
-    y = "ADG (g/day)"
+    plot.margin = margin(8, 12, 8, 12)
   )
 
+# View combined figure
+print(p_combined)
 
-# ============================================================
-# 6. PLOT FCR (10-WEEK)
-# ============================================================
+# save as pdf
 
-p_fcr <- ggplot(fcr10, aes(x = Diet, y = FCR_10wk, fill = Sex)) +
-  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
-  geom_text(
-    aes(label = round(FCR_10wk, 2)),
-    position = position_dodge(width = 0.7),
-    vjust = -0.6,
-    size = 4
-  ) +
-  facet_wrap(
-    ~ Sex,
-    labeller = labeller(Sex = c(F = "Females", M = "Males"))
-  ) +
-  scale_fill_manual(values = sex_palette) +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
-  theme_bw(base_size = 14) +
-  theme(
-    legend.position = "none",
-    axis.title.x = element_text(face = "bold"),
-    axis.title.y = element_text(face = "bold"),
-    strip.text = element_text(face = "bold"),
-    plot.title = element_text(face = "bold", hjust = 0.5)
-  ) +
-  labs(
-    title = "Feed Conversion Ratio (FCR, 10 Weeks) by Diet and Sex",
-    x = "Diet",
-    y = "FCR (g feed / g gain)"
-  )
-
-# Print plots
-p_adg
-p_fcr
-
-
-
-
-
-
-
-
-
-## ============================================================
-## 4. FCR – weekly and 10-week overall
-## ============================================================
-
-### 4.1 Compute weekly means of ADG (per Diet × Sex × Week)
-adg_week <- wg %>%
-  group_by(Diet, Sex, Week) %>%
-  summarise(
-    ADG_week = mean(ADG, na.rm = TRUE),   # g/day
-    .groups  = "drop"
-  )
-
-### 4.2 Compute weekly means of ADFI (per Diet × Sex × Week)
-adfi_week <- fi %>%
-  group_by(Diet, Sex, Week) %>%
-  summarise(
-    ADFI_week = mean(ADFI, na.rm = TRUE), # g feed / animal / day
-    .groups   = "drop"
-  )
-
-### 4.3 Merge & compute weekly FCR
-fcr_week <- adfi_week %>%
-  inner_join(adg_week, by = c("Diet", "Sex", "Week")) %>%
-  # drop weeks where mean ADG is <= 0 (weight loss → FCR not meaningful)
-  filter(ADG_week > 0) %>%
-  mutate(
-    FCR = ADFI_week / ADG_week  # dimensionless: g feed / g gain
-  )
-
-### 4.4 10-week overall FCR per Diet × Sex (descriptive)
-fcr10 <- fcr_week %>%
-  group_by(Diet, Sex) %>%
-  summarise(
-    feed_10wk = sum(ADFI_week),   # Σ(weekly ADFI means) – proportional
-    gain_10wk = sum(ADG_week),    # Σ(weekly ADG means)
-    FCR_10wk  = feed_10wk / gain_10wk,
-    n_weeks   = n(),
-    .groups   = "drop"
-  )
-
-fcr10   # this is the overall FCR (10 weeks) per Diet × Sex
-
-## ============================================================
-## 5. FCR – Statistical analysis on weekly FCR
-## ============================================================
-
-### 5.1 Linear model on weekly FCR
-fcr_mod <- lm(FCR ~ Diet * Sex, data = fcr_week)
-anova(fcr_mod)
-
-# Diagnostics
-fcr_resid <- residuals(fcr_mod)
-shapiro.test(fcr_resid)
-levene_test(FCR ~ Diet * Sex, data = fcr_week)
-
-# If residuals are OK, interpret ANOVA as usual.
-
-### 5.2 LS-means for FCR (Diet × Sex)
-emm_fcr <- emmeans(fcr_mod, ~ Diet * Sex)
-emm_fcr
-pairs(emm_fcr, adjust = "tukey")
-
-# Optional letters
-# fcr_letters <- multcomp::cld(emm_fcr, Letters = letters, adjust = "tukey")
-# fcr_letters
-
-## ============================================================
-## 6. Journal-ready FCR plots
-## ============================================================
-
-### 6.1 Weekly FCR distribution (boxplots by Diet × Sex, faceted by Sex)
-p_fcr_box <- ggplot(fcr_week,
-                    aes(x = Diet, y = FCR, fill = Sex)) +
-  geom_boxplot(
-    alpha         = 0.90,
-    width         = 0.65,
-    outlier.shape = NA,
-    position      = position_dodge(width = 0.8),
-    linewidth     = 0.8
-  ) +
-  stat_summary(
-    fun      = mean,
-    geom     = "point",
-    position = position_dodge(width = 0.8),
-    shape    = 21,
-    size     = 3,
-    fill     = "white",
-    colour   = "black",
-    stroke   = 0.8
-  ) +
-  scale_fill_manual(values = sex_palette) +
-  scale_y_continuous(
-    limits = c(0, NA),
-    expand = expansion(mult = c(0, 0.08))
-  ) +
-  facet_wrap(~ Sex, labeller = labeller(Sex = c("F" = "Females", "M" = "Males"))) +
-  theme_bw(base_size = 14) +
-  theme(
-    legend.position    = "none",
-    panel.grid.minor   = element_blank(),
-    panel.grid.major.x = element_blank(),
-    axis.title.x       = element_text(face = "bold"),
-    axis.title.y       = element_text(face = "bold"),
-    axis.text          = element_text(colour = "black"),
-    strip.text         = element_text(face = "bold"),
-    plot.title         = element_text(face = "bold", hjust = 0.5)
-  ) +
-  labs(
-    title = "Feed conversion ratio (weekly) of guinea pigs by diet and sex",
-    x     = "Diet",
-    y     = "FCR (g feed / g gain)"
-  )
-
-p_fcr_box
-
-### 6.2 LS-mean FCR (Diet × Sex) with 95% CI
-emm_fcr_df <- as.data.frame(emm_fcr)
-
-p_fcr_emm <- ggplot(emm_fcr_df,
-                    aes(x = Diet, y = emmean, colour = Sex, group = Sex)) +
-  geom_point(position = position_dodge(width = 0.4), size = 3) +
-  geom_errorbar(
-    aes(ymin = lower.CL, ymax = upper.CL),
-    position = position_dodge(width = 0.4),
-    width = 0.15,
-    linewidth = 0.8
-  ) +
-  scale_colour_manual(values = sex_palette) +
-  scale_y_continuous(
-    limits = c(0, NA),
-    expand = expansion(mult = c(0, 0.08))
-  ) +
-  theme_bw(base_size = 14) +
-  theme(
-    legend.position    = "top",
-    legend.title       = element_text(face = "bold"),
-    legend.text        = element_text(face = "bold"),
-    panel.grid.minor   = element_blank(),
-    panel.grid.major.x = element_blank(),
-    axis.title.x       = element_text(face = "bold"),
-    axis.title.y       = element_text(face = "bold"),
-    axis.text          = element_text(colour = "black"),
-    plot.title         = element_text(face = "bold", hjust = 0.5)
-  ) +
-  labs(
-    title    = "Least-squares mean FCR of guinea pigs by diet and sex",
-    subtitle = "From linear model on weekly FCR",
-    x        = "Diet",
-    y        = "FCR (g feed / g gain)",
-    colour   = "Sex"
-  )
-
-p_fcr_emm
-
-
-updateR()
+ggsave(
+  filename = "Figure_Feed_Intake_Growth_Efficiency.pdf",
+  plot     = p_combined,
+  width    = 15.5,   # inches (Nature single full-width figure)
+  height   = 5.2,
+  device   = cairo_pdf
+)
 
 
 
 ```
 
+
+```
