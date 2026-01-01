@@ -1,0 +1,37 @@
+Parameter,Test,Factor,df,F_value,P_value,Letters
+basophils,Type III ANOVA,Diet,3,0.452,0.723,NO
+basophils,Type III ANOVA,Diet × Sex,3,0.44,0.731,NO
+basophils,Type III ANOVA,Sex,1,0.79,0.4,NO
+basophils_abs,Type III ANOVA,Diet,3,0.612,0.626,NO
+basophils_abs,Type III ANOVA,Diet × Sex,3,0.475,0.708,NO
+basophils_abs,Type III ANOVA,Sex,1,0.564,0.474,NO
+eosinophils,Type III ANOVA,Diet,3,0.89,0.487,NO
+eosinophils,Type III ANOVA,Diet × Sex,3,0.453,0.722,NO
+eosinophils,Type III ANOVA,Sex,1,0.12,0.738,NO
+eosinophils_abs,Type III ANOVA,Diet,3,0.706,0.575,NO
+eosinophils_abs,Type III ANOVA,Diet × Sex,3,0.105,0.955,NO
+eosinophils_abs,Type III ANOVA,Sex,1,0.472,0.511,NO
+lymphocytes,Type III ANOVA,Diet,3,0.519,0.681,NO
+lymphocytes,Type III ANOVA,Diet × Sex,3,0.034,0.991,NO
+lymphocytes,Type III ANOVA,Sex,1,0.41,0.54,NO
+lymphocytes_abs,Type III ANOVA,Diet,3,0.378,0.772,NO
+lymphocytes_abs,Type III ANOVA,Diet × Sex,3,1.055,0.42,NO
+lymphocytes_abs,Type III ANOVA,Sex,1,3.44,0.101,NO
+monocytes,Type III ANOVA,Diet,3,0.78,0.538,NO
+monocytes,Type III ANOVA,Diet × Sex,3,1.454,0.298,NO
+monocytes,Type III ANOVA,Sex,1,1.507,0.254,NO
+monocytes_abs,Type III ANOVA,Diet,3,0.929,0.47,NO
+monocytes_abs,Type III ANOVA,Diet × Sex,3,2.575,0.127,NO
+monocytes_abs,Type III ANOVA,Sex,1,8.352,0.0202,YES
+neutrophils,Type III ANOVA,Diet,3,0.134,0.937,NO
+neutrophils,Type III ANOVA,Diet × Sex,3,0.496,0.695,NO
+neutrophils,Type III ANOVA,Sex,1,1.029,0.34,NO
+neutrophils_abs,Type III ANOVA,Diet,3,1.042,0.425,NO
+neutrophils_abs,Type III ANOVA,Diet × Sex,3,2.544,0.129,NO
+neutrophils_abs,Type III ANOVA,Sex,1,11.487,0.00951,YES
+platelets,Type III ANOVA,Diet,3,0.597,0.634,NO
+platelets,Type III ANOVA,Diet × Sex,3,1.509,0.285,NO
+platelets,Type III ANOVA,Sex,1,0.086,0.777,NO
+wbc,Type III ANOVA,Diet,3,0.649,0.605,NO
+wbc,Type III ANOVA,Diet × Sex,3,1.779,0.229,NO
+wbc,Type III ANOVA,Sex,1,7.005,0.0294,YES
