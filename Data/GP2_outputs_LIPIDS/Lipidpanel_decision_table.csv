@@ -1,0 +1,13 @@
+Parameter,Test,Factor,df,F_value,P_value,Letters
+chol,Type III ANOVA,Diet,3,0.059,0.98,NO
+chol,Type III ANOVA,Diet × Sex,3,0.624,0.619,NO
+chol,Type III ANOVA,Sex,1,0.644,0.446,NO
+ldl,Type III ANOVA,Diet,3,0.053,0.983,NO
+ldl,Type III ANOVA,Diet × Sex,3,0.647,0.606,NO
+ldl,Type III ANOVA,Sex,1,0.142,0.716,NO
+non_hdl,Type III ANOVA,Diet,3,0.063,0.978,NO
+non_hdl,Type III ANOVA,Diet × Sex,3,0.665,0.597,NO
+non_hdl,Type III ANOVA,Sex,1,0.603,0.46,NO
+trig,Type III ANOVA,Diet,3,0.106,0.954,NO
+trig,Type III ANOVA,Diet × Sex,3,0.775,0.54,NO
+trig,Type III ANOVA,Sex,1,2.772,0.135,NO

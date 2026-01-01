@@ -1,0 +1,22 @@
+Parameter,Test,Factor,df,F_value,P_value,Letters
+haemo,Type III ANOVA,Diet,3,0.448,0.726,NO
+haemo,Type III ANOVA,Diet × Sex,3,0.229,0.874,NO
+haemo,Type III ANOVA,Sex,1,0.005,0.945,NO
+hct,Type III ANOVA,Diet,3,0.61,0.627,NO
+hct,Type III ANOVA,Diet × Sex,3,0.168,0.915,NO
+hct,Type III ANOVA,Sex,1,0.034,0.858,NO
+mch,Type III ANOVA,Diet,3,1.035,0.428,NO
+mch,Type III ANOVA,Diet × Sex,3,0.614,0.625,NO
+mch,Type III ANOVA,Sex,1,0.002,0.964,NO
+mchc,Type III ANOVA,Diet,3,0.956,0.459,NO
+mchc,Type III ANOVA,Diet × Sex,3,0.018,0.996,NO
+mchc,Type III ANOVA,Sex,1,0.062,0.81,NO
+mcv,Type III ANOVA,Diet,3,1.918,0.205,NO
+mcv,Type III ANOVA,Diet × Sex,3,0.45,0.724,NO
+mcv,Type III ANOVA,Sex,1,0.009,0.927,NO
+rbc,Type III ANOVA,Diet,3,0.581,0.644,NO
+rbc,Type III ANOVA,Diet × Sex,3,0.279,0.839,NO
+rbc,Type III ANOVA,Sex,1,0.012,0.915,NO
+rdw,Type III ANOVA,Diet,3,1.055,0.42,NO
+rdw,Type III ANOVA,Diet × Sex,3,0.221,0.879,NO
+rdw,Type III ANOVA,Sex,1,0.667,0.438,NO
